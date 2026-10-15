@@ -13,8 +13,12 @@ namespace duckdb {
 class BinaryDeserializer;
 class ClientContext;
 
-//! Quack wire-protocol version. Client and server agree on it during the connection handshake.
-static constexpr idx_t QUACK_VERSION = 3;
+//! The Quack wire-protocol versions this build speaks. Client and server agree on one during the connection
+//! handshake.
+static constexpr idx_t QUACK_MIN_VERSION = 3;
+static constexpr idx_t QUACK_VERSION = 4;
+//! The first version whose PREPARE can ask for the result's columns without running the statement
+static constexpr idx_t QUACK_DESCRIBE_VERSION = 4;
 
 //! Upper bound both peers enforce on the heartbeat lease timeout
 static constexpr idx_t MAX_HEARTBEAT_TIMEOUT_SECONDS = static_cast<idx_t>(NumericLimits<int64_t>::Maximum() / 1000);
@@ -40,7 +44,7 @@ enum class MessageType : uint8_t {
 template <>
 const char *EnumUtil::ToChars<MessageType>(MessageType value);
 template <>
-MessageType EnumUtil::FromString<MessageType>(const char *value);
+MessageType EnumUtil::FromString<MessageType>(std::string_view value);
 
 // workaround for wrong serialization functions signature on DataChunk :/
 // TODO: remove in 2.0
@@ -170,6 +174,14 @@ public:
 	optional_idx InlineRows() const {
 		return inline_rows;
 	}
+	//! Ask for the result's columns only: the server binds the statement and does not run it, unless it cannot
+	//! (see PrepareResponseMessage::Described).
+	void SetDescribeOnly(bool describe_only_p) {
+		describe_only = describe_only_p;
+	}
+	bool DescribeOnly() const {
+		return describe_only;
+	}
 
 public:
 	const string &Query() const {
@@ -192,6 +204,7 @@ private:
 	string sql_query;
 	hugeint_t query_uuid;
 	optional_idx inline_rows;
+	bool describe_only = false;
 };
 
 class PrepareResponseMessage : public QuackMessage {
@@ -224,6 +237,14 @@ public:
 	hugeint_t QueryUUID() const {
 		return query_uuid;
 	}
+	//! A describe-only PREPARE that the server answered without running the statement: there are no rows.
+	//! False when the server ran it after all, such as for several statements in one PREPARE.
+	void SetDescribed(bool described_p) {
+		described = described_p;
+	}
+	bool Described() const {
+		return described;
+	}
 
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<PrepareResponseMessage> Deserialize(Deserializer &deserializer);
@@ -238,6 +259,7 @@ private:
 	vector<unique_ptr<DataChunkWrapper>> results;
 	bool needs_more_fetch = false;
 	hugeint_t query_uuid;
+	bool described = false;
 };
 
 class ConnectionRequestMessage : public QuackMessage {
@@ -260,10 +282,10 @@ public:
 	const string &ClientPlatform() const {
 		return client_platform;
 	}
-	const idx_t MinimumSupportedQuackVersion() const {
+	idx_t MinimumSupportedQuackVersion() const {
 		return min_supported_quack_version;
 	}
-	const idx_t MaximumSupportedQuackVersion() const {
+	idx_t MaximumSupportedQuackVersion() const {
 		return max_supported_quack_version;
 	}
 	idx_t HeartbeatTimeoutSeconds() const {
@@ -290,7 +312,7 @@ class ConnectionResponseMessage : public QuackMessage {
 public:
 	static constexpr MessageType TYPE = MessageType::CONNECTION_RESPONSE;
 
-	explicit ConnectionResponseMessage(string connection_id_p, idx_t heartbeat_timeout_seconds_p);
+	ConnectionResponseMessage(string connection_id_p, idx_t quack_version_p, idx_t heartbeat_timeout_seconds_p);
 
 protected:
 	ConnectionResponseMessage() : QuackMessage(TYPE) {

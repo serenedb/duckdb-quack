@@ -72,6 +72,12 @@
         "name": "inline_rows",
         "type": "optional_idx",
         "default": "optional_idx()"
+      },
+      {
+        "id": 4,
+        "name": "describe_only",
+        "type": "bool",
+        "default": "false"
       }
     ]
   },
@@ -132,6 +138,12 @@
         "id": 5,
         "name": "query_uuid",
         "type": "hugeint_t"
+      },
+      {
+        "id": 6,
+        "name": "described",
+        "type": "bool",
+        "default": "false"
       }
     ],
     "constructor": ["result_types", "result_names",  "results", "needs_more_fetch", "query_uuid"]

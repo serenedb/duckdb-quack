@@ -1,8 +1,8 @@
 #pragma once
 
-namespace duckdb {
+#include "duckdb/function/table_function.hpp"
 
-class TableFunction;
+namespace duckdb {
 
 class QuackActiveConnectionsFunction {
 public:

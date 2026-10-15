@@ -12,7 +12,7 @@ struct QuackScanBindData : FunctionData {
 		return other.client_connection->ConnectionId() == client_connection->ConnectionId() &&
 		       other.client_connection->ServerURI() == client_connection->ServerURI() &&
 		       other.qualified_table_name == qualified_table_name && other.column_names == column_names &&
-		       other.column_types == column_types;
+		       other.column_types == column_types && other.query == query;
 	}
 	unique_ptr<FunctionData> Copy() const override {
 		auto result = make_uniq<QuackScanBindData>();
@@ -20,6 +20,12 @@ struct QuackScanBindData : FunctionData {
 		result->qualified_table_name = qualified_table_name;
 		result->column_names = column_names;
 		result->column_types = column_types;
+		result->query = query;
+		result->catalog_name = catalog_name;
+		result->use_transaction = use_transaction;
+		result->refresh_catalog = refresh_catalog;
+		// the bind's result belongs to the original, so the copy runs the query again
+		result->bind_result_taken = true;
 		return std::move(result);
 	}
 
@@ -27,7 +33,18 @@ struct QuackScanBindData : FunctionData {
 	//! scan does not read a catalog table but the result of a query
 	QualifiedName qualified_table_name;
 	vector<Identifier> column_names;
+	//! The types of the table, or of the query result
 	vector<LogicalType> column_types;
+	//! The query this scan reads the result of
+	string query;
+	//! The attached database a query runs in. Null when the scan has its own connection
+	Value catalog_name;
+	bool use_transaction = false;
+	bool refresh_catalog = false;
+	//! A server that cannot only describe the query runs it at bind, and the first execution reads that result.
+	//! Any other execution, such as a prepared statement's next one, runs the query.
+	idx_t bind_statement = 0;
+	atomic<bool> bind_result_taken {false};
 	vector<unique_ptr<DataChunkWrapper>> results;
 	shared_ptr<QuackClientConnection> client_connection;
 	optional_ptr<TableCatalogEntry> table_entry;

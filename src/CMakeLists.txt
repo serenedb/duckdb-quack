@@ -10,7 +10,6 @@ add_library(
   quack_client.cpp
   quack_extension.cpp
   quack_fetch_ahead.cpp
-  quack_http_server.cpp
   quack_log.cpp
   quack_message.cpp
   quack_random.cpp
@@ -21,8 +20,7 @@ add_library(
   quack_send_data.cpp
   quack_server.cpp
   quack_settings.cpp
-  quack_ssl_key_generator.cpp
-  quack_start_stop.cpp
+  quack_statement.cpp
   quack_storage.cpp
   quack_uri.cpp
   quack_cancel.cpp

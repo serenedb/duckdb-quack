@@ -2,6 +2,7 @@
 
 #include "duckdb/common/http_util.hpp"
 #include "duckdb/common/optional_ptr.hpp"
+#include "duckdb/common/random_engine.hpp"
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/common/serializer/memory_stream.hpp"
@@ -11,14 +12,15 @@
 #include "quack_periodic_worker.hpp"
 #include "quack_uri.hpp"
 
-#include "httplib.hpp"
-
 namespace duckdb {
 class QuackClientConnection;
 struct QuackClientWrapper;
 
 //! The active query's id, for log correlation. Invalid when no query runs (e.g. transaction start).
 optional_idx QuackActiveClientQueryId(ClientContext &context);
+
+//! How long to wait between two heartbeats of a lease of `heartbeat_timeout_seconds`, with jitter
+milliseconds QuackHeartbeatInterval(idx_t heartbeat_timeout_seconds, RandomEngine &random);
 
 class QuackClient {
 public:
@@ -52,7 +54,10 @@ public:
 	//! POST already-serialized request bytes and return the raw response body, throwing on transport failure.
 	//! Lets an async sender serialize on a producer thread and perform the blocking POST from the ASYNC pool;
 	//! pass context=nullptr when called off the execution thread (parameters fall back to the database).
-	virtual string PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size) = 0;
+	//! A request still running at `deadline`, the statement's ClientContext::query_deadline, fails with the
+	//! statement's timeout error.
+	virtual string PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size,
+	                       optional_idx deadline) = 0;
 
 	//! Best-effort teardown hint: bound the transport for subsequent (final DisconnectMessage) requests so a
 	//! gone/half-open peer cannot block the destructor for the full, possibly hour-long, request timeout.
@@ -80,6 +85,9 @@ public:
 
 	static unique_ptr<QuackClient> GetClient(DatabaseInstance &db, const QuackUri &uri);
 	static unique_ptr<QuackClient> GetClient(ClientContext &context, const QuackUri &uri);
+
+	//! The token to connect with: `token`, or the one of the quack secret scoped to `uri`. Throws if there is none.
+	static string ResolveToken(ClientContext &context, const QuackUri &uri, string token);
 
 	static shared_ptr<QuackClientConnection> ConnectToServer(ClientContext &context, const QuackUri &uri, string token,
 	                                                         string client_id, idx_t heartbeat_timeout_seconds);
@@ -115,17 +123,34 @@ private:
 class QuackClientConnection : public enable_shared_from_this<QuackClientConnection> {
 public:
 	explicit QuackClientConnection(DatabaseInstance &db_p, unique_ptr<QuackClient> client_p, QuackUri uri_p,
-	                               string connection_id_p, idx_t heartbeat_timeout_seconds_p,
+	                               string connection_id_p, idx_t quack_version_p, idx_t heartbeat_timeout_seconds_p,
 	                               idx_t max_connections_cached = 1);
 	~QuackClientConnection();
 
-	void CancelQuery(hugeint_t query_uuid);
+	void CancelQuery(hugeint_t query_uuid) const;
+	//! End the session on the server now. A closed connection refuses every later request.
+	void Close();
+
+	//! The PREPARE of `sql` on this connection
+	unique_ptr<PrepareRequestMessage> MakePrepare(string sql, hugeint_t query_uuid) const;
+	//! The PREPAREs made on this connection. Each one stops the statement the server ran before it.
+	idx_t StatementsStarted() const {
+		return statements_started;
+	}
+
+	//! Keep the lease alive from a thread of this connection's own. A connection of an attached database is
+	//! kept alive by the database instead.
+	void StartHeartbeat();
+	void SendHeartbeat() const;
 
 	const string &ConnectionId() const {
 		return connection_id;
 	}
 	const QuackUri &ServerURI() const {
 		return uri;
+	}
+	idx_t QuackVersion() const {
+		return quack_version;
 	}
 	idx_t HeartbeatTimeoutSeconds() const {
 		return heartbeat_timeout_seconds;
@@ -148,17 +173,19 @@ public:
 private:
 	friend class QuackClient;
 
-	void StartHeartbeat();
-	void SendHeartbeat();
 	unique_ptr<QuackClient> TakeClient(optional_ptr<ClientContext> context) const;
 
 	DatabaseInstance &db;
 	QuackUri uri;
 	string connection_id;
+	//! The protocol version agreed during the connection handshake
+	idx_t quack_version;
 	//! Lease timeout accepted by the server during the connection handshake.
 	idx_t heartbeat_timeout_seconds;
 	mutable mutex lock;
 	mutable atomic<bool> server_invalidated {false};
+	mutable atomic<idx_t> statements_started {0};
+	atomic<bool> closed {false};
 	//! Bounds cached_clients: each cached client holds a persistent socket that pins a server
 	//! connection slot, so an unbounded cache would let one attach starve the server's budget.
 	idx_t max_connections_cached;
@@ -185,14 +212,15 @@ public:
 	HttpsQuackClient(DatabaseInstance &db, const QuackUri &uri_p);
 	~HttpsQuackClient() override;
 
-	string PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size) override;
+	string PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size,
+	               optional_idx deadline) override;
 	void PrepareTeardownRequest() override;
 
 private:
 	unique_ptr<QuackMessage> RequestInternal(optional_ptr<ClientContext> context,
 	                                         unique_ptr<QuackMessage> request_message) override;
 	//! POST bytes assuming request_mutex is already held.
-	string PostRawLocked(const_data_ptr_t data, idx_t size);
+	string PostRawLocked(const_data_ptr_t data, idx_t size, optional_idx deadline);
 	//! Lazily initialise http_params (context-aware) and attach request_logger; assumes request_mutex is held.
 	void EnsureHttpParams(optional_ptr<ClientContext> context);
 
@@ -207,28 +235,6 @@ private:
 	//! Set by PrepareTeardownRequest(): cap the transport timeout and drop retries so the final
 	//! best-effort DisconnectMessage cannot hang the destructor on a dead peer.
 	bool teardown_request = false;
-};
-
-//! HTTPS client that trusts exactly one server certificate, the one whose SHA-256 fingerprint the URI
-//! pins (ssl_fingerprint), instead of the CA chain. Self-signed quack_serve certificates never verify
-//! against a CA, so this is how a client authenticates such a server. Talks httplib+OpenSSL directly:
-//! the httpfs transport has no pinning hook.
-class PinnedHttpsQuackClient : public QuackClient {
-public:
-	PinnedHttpsQuackClient(DatabaseInstance &db, const QuackUri &uri_p);
-	~PinnedHttpsQuackClient() override;
-
-	string PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size) override;
-	void PrepareTeardownRequest() override;
-
-private:
-	unique_ptr<QuackMessage> RequestInternal(optional_ptr<ClientContext> context,
-	                                         unique_ptr<QuackMessage> request_message) override;
-	//! POST bytes assuming request_mutex is already held.
-	string PostRawLocked(const_data_ptr_t data, idx_t size);
-
-private:
-	unique_ptr<duckdb_httplib_openssl::Client> https_client;
 };
 
 } // namespace duckdb

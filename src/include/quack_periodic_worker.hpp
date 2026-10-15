@@ -1,11 +1,11 @@
 #pragma once
 
-#include <condition_variable>
 #include <functional>
 #include <thread>
 
 #include "duckdb/common/assert.hpp"
 #include "duckdb/common/chrono.hpp"
+#include "duckdb/common/mutex.hpp"
 
 namespace duckdb {
 
@@ -26,10 +26,9 @@ public:
 	//! Wake the worker and join its thread
 	void Stop() {
 		{
-			std::lock_guard<std::mutex> guard(lock);
+			lock_guard<mutex> guard(lock);
 			stopping = true;
 		}
-		cv.notify_one();
 		if (thread.joinable()) {
 			thread.join();
 		}
@@ -37,25 +36,27 @@ public:
 
 private:
 	void Loop() {
-		std::unique_lock<std::mutex> guard(lock);
-		while (!stopping) {
-			if (cv.wait_for(guard, interval(), [&] { return stopping; })) {
-				break;
+		auto stopped = [this]() DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
+			return stopping;
+		};
+		while (true) {
+			{
+				lock_guard<mutex> guard(lock);
+				if (lock.AwaitWithTimeout(absl::Condition(&stopped), absl::FromChrono(interval()))) {
+					break;
+				}
 			}
-			guard.unlock();
 			try {
 				tick();
 			} catch (...) {
 			}
-			guard.lock();
 		}
 	}
 
 	std::function<milliseconds()> interval;
 	std::function<void()> tick;
 	std::thread thread;
-	std::mutex lock;
-	std::condition_variable cv;
+	mutex lock;
 	bool stopping = false;
 };
 

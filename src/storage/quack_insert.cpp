@@ -15,6 +15,8 @@
 #include "storage/quack_table.hpp"
 #include "storage/quack_transaction.hpp"
 
+#include <absl/cleanup/cleanup.h>
+
 using namespace duckdb;
 
 namespace {
@@ -70,7 +72,7 @@ unique_ptr<GlobalSinkState> QuackInsert::GetGlobalSinkState(ClientContext &conte
 	auto stream_id = UUID::ToString(UUID::GenerateRandomUUID());
 	auto query_uuid = UUID::GenerateRandomUUID();
 	// The remote name carries the full nested-schema path, so the server resolves the same table.
-	auto remote_name = table_entry->schema.Cast<QuackSchemaCatalogEntry>().GetRemoteName(table_entry->name);
+	auto remote_name = QualifiedName(table_entry->ParentSchemaPath(), table_entry->name);
 	auto sql = StringUtil::Format(
 	    "INSERT INTO %s SELECT * FROM scan_data_from_quack_client(%s, NULL::%s, ordered := %s)", remote_name.ToString(),
 	    SQLString(stream_id), StructPrototype(types), order_mode != AppendOrderMode::UNORDERED ? "true" : "false");
@@ -81,10 +83,19 @@ unique_ptr<GlobalSinkState> QuackInsert::GetGlobalSinkState(ClientContext &conte
 
 	// inline_rows = 0, because the statement waits for our batches and has no row to answer with. The
 	// scan registers the stream while it binds, so PREPARE must land before the first batch.
-	auto client_wrapper = quack_catalog.GetClientConnection()->GetClient(context);
-	auto prepare = make_uniq<PrepareRequestMessage>(quack_catalog.GetConnectionId(), sql, query_uuid);
+	auto connection = quack_catalog.GetClientConnection(context);
+	auto client_wrapper = connection->GetClient(context);
+	auto prepare = connection->MakePrepare(sql, query_uuid);
 	prepare->SetInlineRows(optional_idx(0));
+	// A PREPARE that fails leaves the statement waiting on the server for batches that never come
+	absl::Cleanup cancel_on_failure = [&] {
+		try {
+			connection->CancelQuery(query_uuid);
+		} catch (...) { // NOLINT: best effort, the server may already be gone
+		}
+	};
 	client_wrapper->GetClient().Request<PrepareResponseMessage>(context, std::move(prepare));
+	std::move(cancel_on_failure).Cancel();
 
 	auto emitter = MakeQuackSendDataEmitter(context, *table_entry, std::move(stream_id), query_uuid, debug_delay_ms,
 	                                        debug_duplicate_sends, debug_drop_batch);

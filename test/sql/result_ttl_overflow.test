@@ -27,7 +27,7 @@ SELECT i FROM remote.t5 ORDER BY i;
 4
 
 query I quack_db:quack_server_con
-SELECT cached_rows FROM quack_active_connections();
+SELECT cached_rows FROM (FROM quack_active_connections() WHERE connection_id <> '{harness}');
 ----
 5
 
@@ -48,7 +48,7 @@ SELECT i FROM remote.t5 ORDER BY i;
 
 # An enormous TTL means effectively never expire: the cache is still retained.
 query I quack_db:quack_server_con
-SELECT count(cached_rows) FROM quack_active_connections();
+SELECT count(cached_rows) FROM (FROM quack_active_connections() WHERE connection_id <> '{harness}');
 ----
 1
 
@@ -62,7 +62,7 @@ statement ok
 ATTACH {server} AS remote2;
 
 query I quack_db:quack_server_con
-SELECT count(cached_rows) FROM quack_active_connections();
+SELECT count(cached_rows) FROM (FROM quack_active_connections() WHERE connection_id <> '{harness}');
 ----
 1
 
@@ -85,7 +85,7 @@ SELECT i FROM remote.t5 ORDER BY i;
 
 # NULL reads as 0, so caches never expire and the result is still retained.
 query I quack_db:quack_server_con
-SELECT count(cached_rows) FROM quack_active_connections();
+SELECT count(cached_rows) FROM (FROM quack_active_connections() WHERE connection_id <> '{harness}');
 ----
 1
 
@@ -103,7 +103,7 @@ SELECT i FROM remote.t5 ORDER BY i;
 
 # NULL reads as 0 here too, which is the documented 'unlimited' retention.
 query I quack_db:quack_server_con
-SELECT count(cached_rows) FROM quack_active_connections();
+SELECT count(cached_rows) FROM (FROM quack_active_connections() WHERE connection_id <> '{harness}');
 ----
 1
 

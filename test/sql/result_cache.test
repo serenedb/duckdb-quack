@@ -34,7 +34,7 @@ SELECT i FROM remote.tbl ORDER BY i;
 4
 
 query I quack_db:quack_server_con
-SELECT cached_rows FROM quack_active_connections();
+SELECT cached_rows FROM (FROM quack_active_connections() WHERE connection_id <> '{harness}');
 ----
 NULL
 
@@ -54,7 +54,7 @@ SELECT i FROM remote.tbl ORDER BY i;
 4
 
 query I quack_db:quack_server_con
-SELECT cached_rows FROM quack_active_connections();
+SELECT cached_rows FROM (FROM quack_active_connections() WHERE connection_id <> '{harness}');
 ----
 5
 
@@ -63,7 +63,7 @@ statement ok
 CALL quack_clear_cache();
 
 query I quack_db:quack_server_con
-SELECT cached_rows FROM quack_active_connections();
+SELECT cached_rows FROM (FROM quack_active_connections() WHERE connection_id <> '{harness}');
 ----
 5
 
@@ -74,7 +74,7 @@ SELECT count(*) FROM remote.tbl2;
 7
 
 query I quack_db:quack_server_con
-SELECT cached_rows IS NOT NULL AND cached_rows <> 5 FROM quack_active_connections();
+SELECT cached_rows IS NOT NULL AND cached_rows <> 5 FROM (FROM quack_active_connections() WHERE connection_id <> '{harness}');
 ----
 true
 
@@ -84,7 +84,7 @@ SELECT i FROM remote.empty_t;
 ----
 
 query I quack_db:quack_server_con
-SELECT cached_rows FROM quack_active_connections();
+SELECT cached_rows FROM (FROM quack_active_connections() WHERE connection_id <> '{harness}');
 ----
 0
 
@@ -103,7 +103,7 @@ SELECT i FROM remote.tbl ORDER BY i;
 4
 
 query I quack_db:quack_server_con
-SELECT cached_rows FROM quack_active_connections();
+SELECT cached_rows FROM (FROM quack_active_connections() WHERE connection_id <> '{harness}');
 ----
 NULL
 
@@ -126,7 +126,7 @@ EXECUTE p;
 44999850000
 
 query II quack_db:quack_server_con
-SELECT count(*), count(cached_rows) FROM quack_active_connections();
+SELECT count(*), count(cached_rows) FROM (FROM quack_active_connections() WHERE connection_id <> '{harness}');
 ----
 2	0
 
@@ -143,7 +143,7 @@ EXECUTE p2;
 44999850000
 
 query I quack_db:quack_server_con
-SELECT max(cached_rows) FROM quack_active_connections();
+SELECT max(cached_rows) FROM (FROM quack_active_connections() WHERE connection_id <> '{harness}');
 ----
 300000
 

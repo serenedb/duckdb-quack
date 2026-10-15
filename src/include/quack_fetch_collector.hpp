@@ -10,16 +10,13 @@
 
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/serializer/memory_stream.hpp"
+#include "duckdb/execution/physical_operator.hpp"
+#include "duckdb/main/client_context.hpp"
+#include "duckdb/main/prepared_statement_data.hpp"
 
 #include "quack_claim_buffer.hpp"
 
-#include <condition_variable>
-
 namespace duckdb {
-
-class ClientContext;
-class PhysicalOperator;
-struct PreparedStatementData;
 
 //! One sealed FETCH_RESPONSE chunk blob. The serve path writes its header, with the client-visible
 //! index, directly before the blob.
@@ -48,7 +45,7 @@ struct QuackResultStream {
 			names = std::move(names_p);
 			bound = true;
 		}
-		bind_cv.notify_all();
+		buffer.NotifyChange();
 	}
 
 	//! A scan of this statement registered a client data stream. The statement gives no row until the
@@ -58,22 +55,18 @@ struct QuackResultStream {
 			lock_guard<mutex> guard(bind_lock);
 			client_data_pending = true;
 		}
-		bind_cv.notify_all();
-	}
-
-	//! true = the query is planned, or it waits for client data. false = it failed first. The buffer
-	//! then holds the error.
-	bool WaitBound() {
-		unique_lock<mutex> guard(bind_lock);
-		while (!bound && !client_data_pending && !buffer.HasError() && !buffer.Exhausted()) {
-			bind_cv.wait_for(guard, std::chrono::milliseconds(50));
-		}
-		return bound || client_data_pending;
+		buffer.NotifyChange();
 	}
 
 	bool Bound() {
 		lock_guard<mutex> guard(bind_lock);
 		return bound;
+	}
+
+	//! The statement is planned, or it waits for client data: PREPARE can answer.
+	bool Answerable() {
+		lock_guard<mutex> guard(bind_lock);
+		return bound || client_data_pending;
 	}
 
 	vector<LogicalType> types;
@@ -85,6 +78,8 @@ struct QuackResultStream {
 	//! The dense batches the producer emitted. The terminal response carries it, so a short stream
 	//! fails instead of truncating.
 	optional_idx announced_total;
+	//! A describe-only PREPARE bound the statement and did not run it. Set before the stream finishes.
+	bool described = false;
 
 	//! A payload the stream keeps, header written, so a re-serve sends the same bytes again.
 	struct RetainedPayload {
@@ -134,7 +129,6 @@ struct QuackResultStream {
 
 private:
 	mutex bind_lock;
-	std::condition_variable bind_cv;
 	bool bound = false;
 };
 
