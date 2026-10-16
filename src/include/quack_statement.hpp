@@ -45,9 +45,11 @@ public:
 	}
 
 private:
+	//! Parse the SQL once. It holds one command, as a prepared statement does in PostgreSQL.
+	void Parse();
 	//! Submit the next statement, or close the stream after the last one
 	QuackRunState SubmitNext();
-	//! Bind the only statement and close the stream with its columns. False when the SQL holds several
+	//! Bind the statement and close the stream with its columns. False when the command expands to several
 	//! statements: binding a later one can need the earlier ones run.
 	bool Describe();
 	//! The statements returned no rows: the last one's Success/Count result becomes batch 1
@@ -58,7 +60,9 @@ private:
 	shared_ptr<QuackResultStream> stream;
 	string sql;
 	bool describe_only;
-	unique_ptr<StatementIterator> statements;
+	bool parsed = false;
+	vector<unique_ptr<SQLStatement>> statements;
+	idx_t next_statement = 0;
 	unique_ptr<QueryResult> running;
 	unique_ptr<QueryResult> last_result;
 	bool finished = false;

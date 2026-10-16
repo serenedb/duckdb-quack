@@ -76,6 +76,7 @@ static void RegisterQuackSecretType(ExtensionLoader &loader) {
 static void QuackConnectionIdFunc(const DataChunk &args, ExpressionState &state, Vector &result) {
 	auto catalog_name = args.GetValue(0, 0);
 	auto &quack_catalog = QuackCatalog::GetQuackCatalog(state.GetContext(), catalog_name);
+	QuackStorageExtensionInfo::CheckAccess(state.GetContext(), QuackAccess::ATTACHED, quack_catalog.GetName());
 	result.SetValue(0, Value(quack_catalog.GetClientConnection(state.GetContext())->ConnectionId()));
 }
 
@@ -85,6 +86,7 @@ static void QuackIdentifyFun(ClientContext &, TableFunctionInput &, DataChunk &)
 
 static unique_ptr<FunctionData> QuackIdentifyBind(ClientContext &ctx, TableFunctionBindInput &input,
                                                   vector<LogicalType> &return_types, vector<Identifier> &names) {
+	QuackStorageExtensionInfo::CheckAccess(ctx, QuackAccess::SERVER);
 	auto &db_config = DBConfig::GetConfig(ctx);
 	for (auto &kv : input.named_parameters) {
 		if (kv.second.IsNull()) {
@@ -202,6 +204,15 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "Heartbeat lease timeout in seconds requested by clients when ATTACH / quack_query "
 	                          "omit heartbeat_timeout",
 	                          LogicalType::UBIGINT, Value::UBIGINT(60), ValidateHeartbeatTimeoutSetting);
+
+	config.AddExtensionOption("quack_max_heartbeat_timeout",
+	                          "Most seconds a server keeps a session without a request from its client; a client "
+	                          "asking for longer gets this",
+	                          LogicalType::UBIGINT, Value::UBIGINT(QUACK_MAX_HEARTBEAT_TIMEOUT_DEFAULT),
+	                          ValidateHeartbeatTimeoutSetting, SetScope::GLOBAL);
+
+	config.AddExtensionOption("quack_max_sessions", "Most sessions a server keeps open at once (0 = unlimited)",
+	                          LogicalType::UBIGINT, Value::UBIGINT(0), nullptr, SetScope::GLOBAL);
 
 	config.AddExtensionOption("quack_enable_reconnects",
 	                          "Enable reconnect support (clients acknowledge results, the server caches the last "

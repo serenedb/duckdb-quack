@@ -9,6 +9,7 @@ add_library(
   quack_clear_cache.cpp
   quack_client.cpp
   quack_extension.cpp
+  quack_async_request.cpp
   quack_fetch_ahead.cpp
   quack_log.cpp
   quack_message.cpp

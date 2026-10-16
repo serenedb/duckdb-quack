@@ -9,6 +9,7 @@
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/serializer/memory_stream.hpp"
+#include "duckdb/common/serializer/read_stream.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -141,16 +142,20 @@ struct CacheExpiresLater {
 };
 
 //! One request: its body, where its handling stands while it waits on a statement, and the response.
-class QuackRequest {
-public:
-	//! `body` holds the request bytes and must outlive the request
-	explicit QuackRequest(MemoryStream &body) : body(body) {
+struct QuackRequest {
+	//! `body` reads the request bytes and must outlive the request
+	explicit QuackRequest(ReadStream &body) : body(body) {
 	}
 
 	//! A PREPARE answers with the rows it has instead of waiting for quack_prepare_inline_rows, so a long
 	//! statement continues under FETCH, where the client can interrupt it.
 	void AnswerEarly() {
 		answer_early = true;
+	}
+
+	//! The request's type, once QuackServer::Handle read it
+	MessageType Type() const {
+		return header.type;
 	}
 
 	//! The response body, once QuackServer::Handle answered the request
@@ -161,17 +166,16 @@ public:
 		return response_size;
 	}
 
-private:
-	friend class QuackServer;
-
 	enum class Phase : uint8_t { DECODE, START, WAIT_BOUND, DRAIN, FETCH, SEND, DONE };
 
-	MemoryStream &body;
+	ReadStream &body;
 	Phase phase = Phase::DECODE;
 	MessageHeader header {MessageType::INVALID, string()};
 	unique_ptr<QuackMessage> message;
 	shared_ptr<QuackConnection> connection;
 	int64_t start_time = 0;
+	//! Set while the request's waker is registered and has not fired
+	shared_ptr<atomic<bool>> waker_armed = make_shared_ptr<atomic<bool>>(false);
 
 	//! PREPARE: the statement's stream and what the inline drain took from it
 	shared_ptr<QuackResultStream> stream;
@@ -233,6 +237,8 @@ private:
 	string server_id;
 	mutex active_connections_mutex;
 	unordered_map<string, shared_ptr<QuackConnection>> active_connections;
+	//! CONNECTs between their quack_max_sessions check and their registration
+	idx_t opening_connections = 0;
 	shared_ptr<atomic<idx_t>> live_caches = make_shared_ptr<atomic<idx_t>>(0);
 	//! Min-heap of the expiry-queue slots, at most one per connection with a cache
 	mutex cache_expiry_mutex;

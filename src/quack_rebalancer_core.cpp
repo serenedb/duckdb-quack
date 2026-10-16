@@ -91,12 +91,16 @@ void QuackRebalancerCore::FinalizeCut(ClientContext &context) {
 	ReleaseSettled(NumericLimits<idx_t>::Maximum());
 }
 
-optional_idx QuackRebalancerCore::FinalizeFinish(ClientContext &context) {
-	if (TaskCount() != 0) {
-		throw InternalException("Unemitted batches remain in QuackRebalancerCore::FinalizeFinish");
+bool QuackRebalancerCore::FinalizeFinish(ClientContext &context, optional_ptr<const InterruptState> interrupt,
+                                         optional_idx &row_count) {
+	if (!finish_started) {
+		finish_started = true;
+		if (TaskCount() != 0) {
+			throw InternalException("Unemitted batches remain in QuackRebalancerCore::FinalizeFinish");
+		}
+		memory_manager.FinalCheck();
 	}
-	memory_manager.FinalCheck();
-	return emitter->Finish(context, TotalBatches());
+	return emitter->Finish(context, TotalBatches(), interrupt, row_count);
 }
 
 } // namespace duckdb

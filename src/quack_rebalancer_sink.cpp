@@ -215,20 +215,42 @@ SinkCombineResultType QuackRebalancerCombine(ExecutionContext &context, Operator
 //===--------------------------------------------------------------------===//
 // Finalize
 //===--------------------------------------------------------------------===//
+//! Close the stream. False while the task of `interrupt` is parked until the receiver answered.
+static bool FinishStream(ClientContext &context, QuackRebalancerGlobalState &gstate, const InterruptState &interrupt) {
+	optional_idx reported;
+	if (!gstate.core->FinalizeFinish(context, interrupt, reported)) {
+		return false;
+	}
+	if (reported.IsValid()) {
+		gstate.row_count = reported.GetIndex();
+	}
+	return true;
+}
+
 // The final cut can leave several stamped batches queued, because every producer's tail settles at
-// the same time. These tasks drain them in parallel, then FinishEvent closes the stream.
+// the same time. These tasks drain them in parallel, and the last one to finish closes the stream.
 class QuackEmitRemainingTask : public ExecutorTask {
 public:
 	QuackEmitRemainingTask(Executor &executor, shared_ptr<Event> event_p, QuackRebalancerGlobalState &gstate_p,
-	                       ClientContext &context_p)
-	    : ExecutorTask(executor, std::move(event_p)), gstate(gstate_p), context(context_p) {
+	                       ClientContext &context_p, atomic<idx_t> &running_p)
+	    : ExecutorTask(executor, std::move(event_p)), gstate(gstate_p), context(context_p), running(running_p) {
 	}
 
 	TaskExecutionResult ExecuteTask(TaskExecutionMode mode) override {
-		// A slow client must not stop a scheduler thread: yield instead. The buffer's wake puts this
-		// task back on the queue.
+		// A slow client must not stop a scheduler thread: yield instead. The buffer's wake, or the
+		// receiver's answer, puts this task back on the queue.
 		InterruptState interrupt(shared_from_this());
-		if (gstate.core->ExecuteTasks(context, interrupt) == QuackEmitProgress::BLOCKED) {
+		if (!closing) {
+			if (gstate.core->ExecuteTasks(context, interrupt) == QuackEmitProgress::BLOCKED) {
+				return TaskExecutionResult::TASK_BLOCKED;
+			}
+			if (--running != 0) {
+				event->FinishTask();
+				return TaskExecutionResult::TASK_FINISHED;
+			}
+			closing = true;
+		}
+		if (!FinishStream(context, gstate, interrupt)) {
 			return TaskExecutionResult::TASK_BLOCKED;
 		}
 		event->FinishTask();
@@ -242,6 +264,8 @@ public:
 private:
 	QuackRebalancerGlobalState &gstate;
 	ClientContext &context;
+	atomic<idx_t> &running;
+	bool closing = false;
 };
 
 class QuackEmitRemainingEvent : public BasePipelineEvent {
@@ -254,40 +278,36 @@ public:
 		vector<shared_ptr<Task>> tasks;
 		auto num_threads =
 		    MinValue<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads(), gstate.core->TaskCount());
+		running = num_threads;
 		for (idx_t i = 0; i < num_threads; i++) {
-			tasks.push_back(make_uniq<QuackEmitRemainingTask>(pipeline->executor, shared_from_this(), gstate, context));
+			tasks.push_back(
+			    make_uniq<QuackEmitRemainingTask>(pipeline->executor, shared_from_this(), gstate, context, running));
 		}
 		D_ASSERT(!tasks.empty());
 		SetTasks(std::move(tasks));
 	}
 
-	void FinishEvent() override {
-		auto reported = gstate.core->FinalizeFinish(context);
-		if (reported.IsValid()) {
-			gstate.row_count = reported.GetIndex();
-		}
-	}
-
 private:
 	QuackRebalancerGlobalState &gstate;
 	ClientContext &context;
+	//! The tasks still emitting
+	atomic<idx_t> running {0};
 };
 
 SinkFinalizeType QuackRebalancerFinalize(Pipeline &pipeline, Event &event, ClientContext &context,
-                                         QuackRebalancerGlobalState &gstate) {
+                                         QuackRebalancerGlobalState &gstate, const InterruptState &interrupt) {
 	auto &core = *gstate.core;
-	core.FinalizeCut(context);
-	// A single batch emits here. Several batches, or one that parks on capacity, go to the event
-	// tasks: those emit in parallel, and they can yield when the delivery buffer is full.
-	if (core.TaskCount() <= 1 && core.ExecuteTasks(context) == QuackEmitProgress::DONE) {
-		auto reported = core.FinalizeFinish(context);
-		if (reported.IsValid()) {
-			gstate.row_count = reported.GetIndex();
+	if (!gstate.finalize_started) {
+		gstate.finalize_started = true;
+		core.FinalizeCut(context);
+		// A single batch emits here. Several batches, or one that parks on capacity, go to the event
+		// tasks: those emit in parallel, and they can yield when the delivery buffer is full.
+		if (core.TaskCount() > 1 || core.ExecuteTasks(context) != QuackEmitProgress::DONE) {
+			event.InsertEvent(make_shared_ptr<QuackEmitRemainingEvent>(gstate, pipeline, context));
+			return SinkFinalizeType::READY;
 		}
-	} else {
-		event.InsertEvent(make_shared_ptr<QuackEmitRemainingEvent>(gstate, pipeline, context));
 	}
-	return SinkFinalizeType::READY;
+	return FinishStream(context, gstate, interrupt) ? SinkFinalizeType::READY : SinkFinalizeType::BLOCKED;
 }
 
 } // namespace duckdb

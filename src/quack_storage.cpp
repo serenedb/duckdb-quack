@@ -21,6 +21,7 @@ static bool IsBareQuackPath(const string &uri) {
 static unique_ptr<Catalog> QuackAttach(optional_ptr<StorageExtensionInfo> storage_info, ClientContext &context,
                                        AttachedDatabase &db, const string &name, AttachInfo &info,
                                        AttachOptions &attach_options) {
+	QuackStorageExtensionInfo::CheckAccess(context, QuackAccess::CONNECT);
 	// info.path may or may not already carry the "quack:" prefix.
 	auto uri = StringUtil::StartsWith(info.path, "quack:") ? info.path : "quack:" + info.path;
 
@@ -88,6 +89,13 @@ QuackStorageExtensionInfo &QuackStorageExtensionInfo::GetState(const DatabaseIns
 		throw InternalException("The quack extension is not loaded");
 	}
 	return static_cast<QuackStorageExtensionInfo &>(*extension->storage_info);
+}
+
+void QuackStorageExtensionInfo::CheckAccess(ClientContext &context, QuackAccess access, const Identifier &catalog) {
+	auto &state = GetState(*context.db);
+	if (state.access_check) {
+		state.access_check(context, access, catalog);
+	}
 }
 
 void QuackStorageExtensionInfo::AddServer(QuackServer &server) {

@@ -23,6 +23,7 @@
 #include "storage/quack_insert.hpp"
 #include "quack_message.hpp"
 #include "quack_client.hpp"
+#include "quack_storage.hpp"
 #include "storage/quack_transaction.hpp"
 
 // FIXME bunch of stuff copied from postgres scanner, can probably be simplified!
@@ -41,7 +42,22 @@ public:
 	}
 	void Add(const string &attach_id, shared_ptr<QuackClientConnection> session) {
 		lock_guard<mutex> guard(lock);
+		// the sessions of detached databases
+		for (auto entry = sessions.begin(); entry != sessions.end();) {
+			if (entry->second->Closed()) {
+				sessions.erase(entry++);
+			} else {
+				++entry;
+			}
+		}
 		sessions[attach_id] = std::move(session);
+	}
+	void DropLost(const string &attach_id) {
+		lock_guard<mutex> guard(lock);
+		auto entry = sessions.find(attach_id);
+		if (entry != sessions.end() && entry->second->Lost()) {
+			sessions.erase(entry);
+		}
 	}
 
 private:
@@ -61,8 +77,10 @@ QuackCatalog::QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri_p,
 		default_schema = Identifier(load_info.schemas->GetValue(4, 0).GetValue<string>());
 	}
 	auto random = make_shared_ptr<RandomEngine>();
-	heartbeat.Start([this, random] { return QuackHeartbeatInterval(heartbeat_timeout_seconds, *random); },
-	                [this] { SendHeartbeats(); });
+	heartbeat.Start(
+	    QuackStorageExtensionInfo::GetState(*context.db).scheduler,
+	    [this, random] { return QuackHeartbeatInterval(heartbeat_timeout_seconds, *random); },
+	    [this] { SendHeartbeats(); });
 }
 
 shared_ptr<QuackClientConnection> QuackCatalog::GetClientConnection(ClientContext &context) {
@@ -81,6 +99,12 @@ shared_ptr<QuackClientConnection> QuackCatalog::GetClientConnection(ClientContex
 	}
 	local_sessions->Add(attach_id, session);
 	return session;
+}
+
+void QuackCatalog::DropLostSession(ClientContext &context) {
+	if (auto local_sessions = context.registered_state->Get<QuackClientSessions>(QuackClientSessions::KEY)) {
+		local_sessions->DropLost(attach_id);
+	}
 }
 
 void QuackCatalog::SendHeartbeats() {

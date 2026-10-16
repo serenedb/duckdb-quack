@@ -42,6 +42,8 @@ public:
 	idx_t minimum_memory_per_thread;
 	atomic<idx_t> row_count;
 	unique_ptr<QuackRebalancerCore> core;
+	//! Finalize ran its cut: a call after a BLOCKED one only waits for the stream to close
+	bool finalize_started = false;
 	//! Weak, to prevent a reference cycle. Set only if GetResult needs the client context.
 	weak_ptr<ClientContext> client_context;
 };
@@ -77,6 +79,6 @@ SinkResultType QuackRebalancerSink(ExecutionContext &context, DataChunk &chunk, 
 SinkNextBatchType QuackRebalancerNextBatch(ExecutionContext &context, OperatorSinkNextBatchInput &input);
 SinkCombineResultType QuackRebalancerCombine(ExecutionContext &context, OperatorSinkCombineInput &input);
 SinkFinalizeType QuackRebalancerFinalize(Pipeline &pipeline, Event &event, ClientContext &context,
-                                         QuackRebalancerGlobalState &gstate);
+                                         QuackRebalancerGlobalState &gstate, const InterruptState &interrupt);
 
 } // namespace duckdb

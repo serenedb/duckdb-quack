@@ -76,9 +76,11 @@ public:
 	//! With `interrupt` set, capacity freeing fires it. An emitter that cannot fill up returns true.
 	virtual bool TryEmitPrepared(ClientContext &context, idx_t dense_index, unique_ptr<QuackPreparedBatch> &batch,
 	                             optional_ptr<const InterruptState> interrupt) = 0;
-	//! The receiver's own row count, when it reports one. It replaces the count the sink made. For an
-	//! INSERT the sink counts what it sent, not what landed.
-	virtual optional_idx Finish(ClientContext &context, idx_t total_batches) = 0;
+	//! Close the stream. False while the task of `interrupt` is parked until the receiver answers: call again
+	//! then. `row_count` gets the receiver's own count, when it reports one. It replaces the count the sink
+	//! made: for an INSERT the sink counts what it sent, not what landed.
+	virtual bool Finish(ClientContext &context, idx_t total_batches, optional_ptr<const InterruptState> interrupt,
+	                    optional_idx &row_count) = 0;
 };
 
 //! BLOCKED = a batch is parked on delivery capacity and stays queued. The caller must yield with a
@@ -137,8 +139,9 @@ public:
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		return task_manager.TaskCount() + parked_tasks.size();
 	}
-	//! Verify the accounting, then let the emitter close the stream.
-	optional_idx FinalizeFinish(ClientContext &context);
+	//! Verify the accounting, then let the emitter close the stream. False while the task of `interrupt` is
+	//! parked until the stream is closed.
+	bool FinalizeFinish(ClientContext &context, optional_ptr<const InterruptState> interrupt, optional_idx &row_count);
 
 	BatchMemoryManager &MemoryManager() {
 		return memory_manager;
@@ -174,6 +177,7 @@ private:
 	//! Test override: a value above 0 also counts this many pending bytes as out of memory.
 	idx_t buffer_bytes_override;
 	unique_ptr<QuackBatchEmitter> emitter;
+	bool finish_started = false;
 };
 
 } // namespace duckdb

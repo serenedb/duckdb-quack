@@ -29,6 +29,10 @@ QuackRunState QuackStatementRunner::Step(const std::function<void()> &on_resched
 		if (!running) {
 			return SubmitNext();
 		}
+		if (stream->buffer.HasError()) {
+			// an abort that came before the statement started was cleared by its start
+			context.Interrupt();
+		}
 		switch (running->ExecuteTask(on_reschedule)) {
 		case QueryResultState::NOT_READY:
 			return QuackRunState::NOT_READY;
@@ -69,6 +73,7 @@ QuackRunState QuackStatementRunner::SubmitNext() {
 		finished = true;
 		return QuackRunState::FINISHED;
 	}
+	Parse();
 	if (describe_only) {
 		describe_only = false;
 		if (Describe()) {
@@ -76,22 +81,16 @@ QuackRunState QuackStatementRunner::SubmitNext() {
 			return QuackRunState::FINISHED;
 		}
 	}
-	if (!statements) {
-		statements = make_uniq<StatementIterator>(context.IterateStatements(sql));
-	}
-	unique_ptr<SQLStatement> statement;
-	while (!statement) {
-		if (!statements->Peek()) {
-			if (!stream->Bound()) {
-				SendLastResult();
-			}
-			// Close against the announced total, so a short stream errors instead of truncating.
-			stream->buffer.Finish(stream->announced_total);
-			finished = true;
-			return QuackRunState::FINISHED;
+	if (next_statement == statements.size()) {
+		if (!stream->Bound()) {
+			SendLastResult();
 		}
-		statement = statements->GetStatementForExecution();
+		// Close against the announced total, so a short stream errors instead of truncating.
+		stream->buffer.Finish(stream->announced_total);
+		finished = true;
+		return QuackRunState::FINISHED;
 	}
+	auto statement = std::move(statements[next_statement++]);
 	// The first statement that returns rows sends them into the stream, every other one keeps the default
 	// collector (see MakeQuackFetchCollector).
 	auto &config = ClientConfig::GetConfig(context);
@@ -115,23 +114,29 @@ QuackRunState QuackStatementRunner::SubmitNext() {
 	return QuackRunState::NOT_READY;
 }
 
-bool QuackStatementRunner::Describe() {
-	auto parsed = context.IterateStatements(sql);
-	unique_ptr<SQLStatement> statement;
-	while (parsed.Peek()) {
-		auto next = parsed.GetStatementForExecution();
-		if (!next) {
-			continue;
-		}
-		if (statement) {
-			return false;
-		}
-		statement = std::move(next);
+void QuackStatementRunner::Parse() {
+	if (parsed) {
+		return;
 	}
-	if (!statement) {
+	parsed = true;
+	auto iterator = context.IterateStatements(sql);
+	idx_t commands = 0;
+	while (iterator.Peek()) {
+		if (auto statement = iterator.GetStatementForExecution()) {
+			statements.push_back(std::move(statement));
+		}
+		if (iterator.PeelDone() && ++commands > 1) {
+			throw ParserException("cannot insert multiple commands into a prepared statement");
+		}
+	}
+}
+
+bool QuackStatementRunner::Describe() {
+	if (statements.size() != 1) {
 		return false;
 	}
-	auto signature = context.BindStatement(std::move(statement));
+	auto signature = context.BindStatement(std::move(statements[0]));
+	next_statement = 1;
 	vector<string> names;
 	names.reserve(signature.names.size());
 	for (auto &name : signature.names) {

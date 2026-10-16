@@ -15,6 +15,8 @@ class ClientContext;
 
 //! The Quack wire-protocol versions this build speaks. Client and server agree on one during the connection
 //! handshake.
+//! The error of a request on a session the server does not know
+static constexpr const char *QUACK_INVALID_CONNECTION_ID = "Invalid connection id";
 static constexpr idx_t QUACK_MIN_VERSION = 3;
 static constexpr idx_t QUACK_VERSION = 4;
 //! The first version whose PREPARE can ask for the result's columns without running the statement

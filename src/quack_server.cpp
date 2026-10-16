@@ -16,6 +16,8 @@
 
 #include "mbedtls_wrapper.hpp"
 
+#include <absl/cleanup/cleanup.h>
+
 namespace duckdb {
 
 static bool LeaseTimeoutElapsed(time_point<steady_clock> last_renewed_at, time_point<steady_clock> now,
@@ -27,12 +29,17 @@ static bool LeaseTimeoutElapsed(time_point<steady_clock> last_renewed_at, time_p
 	return static_cast<idx_t>(elapsed_seconds) >= timeout_seconds;
 }
 
-//! Stop the connection's statement: error its stream, so the requests that wait on it and the producers parked
-//! on its capacity wake, and interrupt it. The host's driver then finishes it.
-static void AbortStatement(QuackConnection &connection, const string &reason) {
+//! Stop the connection's statement if `matches` accepts its stream and query: error its stream, so the requests
+//! that wait on it and the producers parked on its capacity wake, and interrupt it. The host's driver then
+//! finishes it.
+template <class MATCHES>
+static bool AbortStatementIf(QuackConnection &connection, const string &reason, MATCHES &&matches) {
 	shared_ptr<QuackResultStream> stream;
 	{
 		annotated_lock_guard<annotated_mutex> guard(connection.statement.lock);
+		if (!matches(connection.statement.stream.get(), connection.statement.query_uuid)) {
+			return false;
+		}
 		stream = std::move(connection.statement.stream);
 		if (stream) {
 			// the abort reason must not hide a real failure
@@ -45,13 +52,32 @@ static void AbortStatement(QuackConnection &connection, const string &reason) {
 		session_state->Streams().Clear(reason);
 	}
 	if (!stream) {
-		return;
+		return true;
 	}
 	auto was_finished = stream->buffer.Finished();
 	stream->buffer.SetError(ErrorData(ExceptionType::INTERRUPT, reason));
 	if (!was_finished) {
 		connection.host_session->Interrupt();
 	}
+	return true;
+}
+
+static void AbortStatement(QuackConnection &connection, const string &reason) {
+	AbortStatementIf(connection, reason, [](const QuackResultStream *, hugeint_t) { return true; });
+}
+
+//! Register the request's waker with `buffer` unless it waits there already. True when it was registered now:
+//! the caller then looks once more, so a change between its look and the registration is not missed.
+template <class BUFFER>
+static bool ArmWaker(QuackRequest &request, BUFFER &buffer, const QuackWaker &waker) {
+	if (request.waker_armed->exchange(true)) {
+		return false;
+	}
+	buffer.AddWaker([armed = request.waker_armed, waker] {
+		armed->store(false);
+		waker();
+	});
+	return true;
 }
 
 QuackConnection::QuackConnection(string connection_id_p, idx_t heartbeat_timeout_seconds_p,
@@ -409,7 +435,6 @@ unique_ptr<QuackMessage> QuackServer::Dispatch(QuackRequest &request, QuackServe
 			                                ValidChecker::Get(*db).InvalidatedMessage());
 		}
 		request.start_time = QuackNowMillis();
-		request.body.Rewind();
 		BinaryDeserializer deserializer(request.body);
 		request.header = QuackMessage::DeserializeHeader(deserializer);
 		// validate if the server can handle this type of message - the server cannot handle all message types
@@ -420,7 +445,7 @@ unique_ptr<QuackMessage> QuackServer::Dispatch(QuackRequest &request, QuackServe
 		if (request.header.type != MessageType::CONNECTION_REQUEST) {
 			request.connection = GetConnection(request.header.connection_id);
 			if (!request.connection) {
-				return make_uniq<ErrorResponse>("Invalid connection id");
+				return make_uniq<ErrorResponse>(QUACK_INVALID_CONNECTION_ID);
 			}
 		}
 		SweepExpiredCaches(*db);
@@ -474,6 +499,29 @@ unique_ptr<QuackMessage> QuackServer::Connect(QuackRequest &request, QuackServer
 		return make_uniq<ErrorResponse>(StringUtil::Format(
 		    "heartbeat_timeout out of range - must be between 1 and %llu seconds", MAX_HEARTBEAT_TIMEOUT_SECONDS));
 	}
+	auto db = db_ptr.lock();
+	if (!db) {
+		return make_uniq<ErrorResponse>("Database was closed");
+	}
+	heartbeat_timeout_seconds =
+	    MinValue(heartbeat_timeout_seconds,
+	             QuackGetUBigintSetting(*db, "quack_max_heartbeat_timeout", QUACK_MAX_HEARTBEAT_TIMEOUT_DEFAULT));
+	auto max_sessions = QuackGetUBigintSetting(*db, "quack_max_sessions", 0);
+	{
+		lock_guard<mutex> lock(active_connections_mutex);
+		if (max_sessions != 0 && active_connections.size() + opening_connections >= max_sessions) {
+			return make_uniq<ErrorResponse>(
+			    StringUtil::Format("Too many Quack sessions: the server keeps at most %llu", max_sessions));
+		}
+		opening_connections++;
+	}
+	bool registered = false;
+	absl::Cleanup release_slot = [&] {
+		if (!registered) {
+			lock_guard<mutex> lock(active_connections_mutex);
+			opening_connections--;
+		}
+	};
 	auto connection_id = GenerateConnectionId();
 	auto host_session = host.OpenSession(connection_id, connection_request_message);
 	// scan_data_from_quack_client registers its streams here, and SEND_DATA finds them by connection.
@@ -489,6 +537,8 @@ unique_ptr<QuackMessage> QuackServer::Connect(QuackRequest &request, QuackServer
 		lock_guard<mutex> lock(active_connections_mutex);
 		D_ASSERT(active_connections.find(connection_id) == active_connections.end());
 		active_connections[connection_id] = std::move(connection);
+		opening_connections--;
+		registered = true;
 	}
 	return make_uniq<ConnectionResponseMessage>(connection_id, quack_version, heartbeat_timeout_seconds);
 }
@@ -502,10 +552,15 @@ unique_ptr<QuackMessage> QuackServer::Prepare(QuackRequest &request, const Quack
 	}
 
 	auto fail = [&](const ErrorData &error) -> unique_ptr<QuackMessage> {
-		AbortStatement(connection, "query failed");
-		lock_guard<mutex> lock(connection.lock);
-		connection.sql_query = "";
-		connection.query_state = QuackQueryState::CANCELLED;
+		// a later PREPARE may have replaced this statement already
+		auto is_this_statement = [&](const QuackResultStream *current, hugeint_t) {
+			return current == request.stream.get();
+		};
+		if (AbortStatementIf(connection, "query failed", is_this_statement)) {
+			lock_guard<mutex> lock(connection.lock);
+			connection.sql_query = "";
+			connection.query_state = QuackQueryState::CANCELLED;
+		}
 		return make_uniq<ErrorResponse>(error);
 	};
 
@@ -567,15 +622,13 @@ unique_ptr<QuackMessage> QuackServer::Prepare(QuackRequest &request, const Quack
 				                ? stream.buffer.GetError()
 				                : ErrorData(ExceptionType::INVALID_INPUT, "Query did not return any columns"));
 			}
-			stream.buffer.AddWaker(waker);
-			if (!stream.Answerable() && !stream.buffer.Finished()) {
+			if (!ArmWaker(request, stream.buffer, waker)) {
 				return nullptr;
 			}
 		}
 		request.phase = QuackRequest::Phase::DRAIN;
 	}
 
-	bool waker_added = false;
 	while (request.inline_rows < request.max_inline_rows) {
 		QuackFetchPayload entry;
 		auto status = stream.buffer.TryPopClaimed(request.consumed + 1, entry);
@@ -608,12 +661,9 @@ unique_ptr<QuackMessage> QuackServer::Prepare(QuackRequest &request, const Quack
 		if (request.answer_early) {
 			break;
 		}
-		if (waker_added) {
+		if (!ArmWaker(request, stream.buffer, waker)) {
 			return nullptr;
 		}
-		// look once more after the waker is in, so a batch pushed in between is not missed
-		stream.buffer.AddWaker(waker);
-		waker_added = true;
 	}
 	stream.prepare_batches = request.consumed;
 	if (request.retain_result) {
@@ -689,7 +739,7 @@ unique_ptr<QuackMessage> QuackServer::Fetch(QuackRequest &request, const QuackWa
 	}
 
 	auto &stream = *request.stream;
-	for (bool waker_added = false;; waker_added = true) {
+	for (;;) {
 		QuackClaimPopStatus status = QuackClaimPopStatus::EMPTY;
 		QuackFetchPayload entry;
 		shared_ptr<MemoryStream> served_batch;
@@ -738,11 +788,9 @@ unique_ptr<QuackMessage> QuackServer::Fetch(QuackRequest &request, const QuackWa
 			}
 			return std::move(response);
 		}
-		if (waker_added) {
+		if (!ArmWaker(request, stream.buffer, waker)) {
 			return nullptr;
 		}
-		// look once more after the waker is in, so a batch pushed in between is not missed
-		stream.buffer.AddWaker(waker);
 	}
 }
 
@@ -780,7 +828,7 @@ unique_ptr<QuackMessage> QuackServer::SendData(QuackRequest &request, const Quac
 			                                   nullptr);
 		};
 		if (push() == QuackPushStatus::NO_CAPACITY) {
-			stream->buffer.AddWaker(waker);
+			ArmWaker(request, stream->buffer, waker);
 			if (push() == QuackPushStatus::NO_CAPACITY) {
 				return nullptr;
 			}
@@ -811,17 +859,15 @@ unique_ptr<QuackMessage> QuackServer::Cancel(QuackRequest &request) {
 	// {0,0} is a wildcard — cancel whatever query is running on this connection
 	bool is_wildcard = cancel_request_message.query_uuid == hugeint_t {0, 0};
 	hugeint_t active_query_uuid;
-	{
-		annotated_lock_guard<annotated_mutex> guard(connection.statement.lock);
-		active_query_uuid = connection.statement.query_uuid;
-	}
-	if (!is_wildcard && active_query_uuid != cancel_request_message.query_uuid) {
+	auto is_target = [&](const QuackResultStream *, hugeint_t query_uuid) {
+		active_query_uuid = query_uuid;
+		return is_wildcard || query_uuid == cancel_request_message.query_uuid;
+	};
+	// A client finds a cancel by the "Interrupt" text.
+	if (!AbortStatementIf(connection, "Interrupted: query was cancelled", is_target)) {
 		return make_uniq<ErrorResponse>("Attempted to cancel a different query with id '%s' instead of '%s'",
 		                                cancel_request_message.query_uuid, active_query_uuid);
 	}
-	// A client finds a cancel by the "Interrupt" text.
-	AbortStatement(connection, "Interrupted: query was cancelled");
-	connection.host_session->Interrupt();
 	lock_guard<mutex> lock(connection.lock);
 	connection.query_state = QuackQueryState::CANCELLED;
 	connection.ClearResultCache();

@@ -10,6 +10,8 @@ QuackTransaction::QuackTransaction(QuackCatalog &quack_catalog_p, TransactionMan
                                    ClientContext &context_p)
     : Transaction(manager_p, context_p), quack_catalog(quack_catalog_p),
       transaction_state(QuackTransactionState::TRANSACTION_NOT_YET_STARTED) {
+	// a transaction that ran on a lost session failed with it; a new one starts on a new session
+	quack_catalog.DropLostSession(context_p);
 }
 
 QuackTransaction::~QuackTransaction() {

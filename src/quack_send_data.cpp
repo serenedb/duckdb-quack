@@ -6,6 +6,7 @@
 #include "duckdb/common/thread.hpp"
 #include "duckdb/main/client_context.hpp"
 
+#include "quack_async_request.hpp"
 #include "quack_client.hpp"
 #include "quack_log.hpp"
 #include "quack_message.hpp"
@@ -13,6 +14,13 @@
 #include "storage/quack_table.hpp"
 
 namespace duckdb {
+
+static void ExpectType(QuackMessage &message, MessageType type) {
+	if (message.Type() != type) {
+		throw IOException("Expected %s message, got %s instead", MessageTypeToString(type),
+		                  MessageTypeToString(message.Type()));
+	}
+}
 
 //===--------------------------------------------------------------------===//
 // Async send task
@@ -221,30 +229,43 @@ public:
 		return true;
 	}
 
-	optional_idx Finish(ClientContext &context, idx_t total_batches) override {
-		// Drain every send first. The buffer checks the count when the terminal message arrives.
-		queue->Close();
-		queue.reset();
-
-		auto client_wrapper = session->GetClient(context);
-		auto &client = client_wrapper->GetClient();
-
-		// The terminal message is an ordinary SEND_DATA with no chunks. It closes the stream against the
-		// batch count, so a lost batch fails the statement.
-		auto terminal = make_uniq<SendDataRequestMessage>(session->ConnectionId(), stream_id);
-		terminal->SetTotalBatches(total_batches);
-		client.Request<SendDataResponseMessage>(context, std::move(terminal));
-
-		// The statement's result is one row: the rows it changed. Fetch it like any result, so a
-		// failure after the last batch surfaces here too.
-		auto fetch = make_uniq<FetchRequestMessage>(session->ConnectionId(), query_uuid, 1, 1);
-		auto response = client.Request<FetchResponseMessage>(context, std::move(fetch));
-		for (auto &chunk : response->MutableResults()) {
+	bool Finish(ClientContext &context, idx_t total_batches, optional_ptr<const InterruptState> interrupt,
+	            optional_idx &row_count) override {
+		auto cancel = [session = session, query_uuid = query_uuid] {
+			session->CancelQuery(query_uuid);
+		};
+		if (!terminal) {
+			// Drain every send first. The buffer checks the count when the terminal message arrives.
+			queue->Close();
+			queue.reset();
+			// The terminal message is an ordinary SEND_DATA with no chunks. It closes the stream against the
+			// batch count, so a lost batch fails the statement.
+			SendDataRequestMessage message(session->ConnectionId(), stream_id);
+			message.SetTotalBatches(total_batches);
+			terminal = make_uniq<QuackAsyncRequest>(context, *session, message, cancel);
+		}
+		if (!result) {
+			if (!terminal->Ready(interrupt)) {
+				return false;
+			}
+			ExpectType(*terminal->TakeResponse(), SendDataResponseMessage::TYPE);
+			// The statement's result is one row: the rows it changed. Fetch it like any result, so a
+			// failure after the last batch surfaces here too.
+			FetchRequestMessage fetch(session->ConnectionId(), query_uuid, 1, 1);
+			result = make_uniq<QuackAsyncRequest>(context, *session, fetch, cancel);
+		}
+		if (!result->Ready(interrupt)) {
+			return false;
+		}
+		auto message = result->TakeResponse();
+		ExpectType(*message, FetchResponseMessage::TYPE);
+		for (auto &chunk : message->Cast<FetchResponseMessage>().MutableResults()) {
 			if (chunk->size() > 0 && chunk->ColumnCount() > 0) {
-				return optional_idx(NumericCast<idx_t>(chunk->GetValue(0, 0).GetValue<int64_t>()));
+				row_count = optional_idx(NumericCast<idx_t>(chunk->GetValue(0, 0).GetValue<int64_t>()));
+				break;
 			}
 		}
-		return optional_idx();
+		return true;
 	}
 
 private:
@@ -258,6 +279,10 @@ private:
 	idx_t debug_drop_batch;
 	//! Regular threads register payloads. Async-pool threads POST them.
 	unique_ptr<ManagedAsyncTaskQueue> queue;
+	//! The closing requests, sent from the async pool while Finish parks: the terminal message, then the fetch of
+	//! the statement's row count, which answers once the server applied every row
+	unique_ptr<QuackAsyncRequest> terminal;
+	unique_ptr<QuackAsyncRequest> result;
 };
 
 unique_ptr<QuackBatchEmitter> MakeQuackSendDataEmitter(ClientContext &context, QuackTableCatalogEntry &table,

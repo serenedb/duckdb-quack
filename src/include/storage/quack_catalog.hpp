@@ -86,6 +86,8 @@ public:
 	//! The server session of `context`. Every local session gets its own, so their statements and transactions
 	//! do not run into each other on the server.
 	shared_ptr<QuackClientConnection> GetClientConnection(ClientContext &context);
+	//! Forget the session of `context` if the server lost it, so the next statement opens a new one
+	void DropLostSession(ClientContext &context);
 
 	void Refresh(ClientContext &context);
 

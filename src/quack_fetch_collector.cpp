@@ -88,12 +88,12 @@ public:
 		return true;
 	}
 
-	optional_idx Finish(ClientContext &context, idx_t total_batches) override {
-		// Do NOT finish the buffer here. The claimed statement can sit in the middle of a
-		// multi-statement query, and the client must not see the stream end while more statements run.
-		// DriveQuery closes the stream, and it checks the count against this total.
+	bool Finish(ClientContext &context, idx_t total_batches, optional_ptr<const InterruptState> interrupt,
+	            optional_idx &row_count) override {
+		// Do NOT finish the buffer here. The statement runner closes the stream once the statement ended, and
+		// it checks the count against this total.
 		stream->announced_total = total_batches;
-		return optional_idx();
+		return true;
 	}
 
 private:
@@ -142,7 +142,8 @@ public:
 
 	SinkFinalizeType Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
 	                          OperatorSinkFinalizeInput &input) const override {
-		return QuackRebalancerFinalize(pipeline, event, context, input.global_state.Cast<QuackRebalancerGlobalState>());
+		return QuackRebalancerFinalize(pipeline, event, context, input.global_state.Cast<QuackRebalancerGlobalState>(),
+		                               input.interrupt_state);
 	}
 
 	unique_ptr<QueryResult> GetResult(GlobalSinkState &state) const override {

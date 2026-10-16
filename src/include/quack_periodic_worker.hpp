@@ -6,28 +6,46 @@
 #include "duckdb/common/assert.hpp"
 #include "duckdb/common/chrono.hpp"
 #include "duckdb/common/mutex.hpp"
+#include "duckdb/common/shared_ptr.hpp"
 
 namespace duckdb {
 
-//! A background thread that runs `tick` roughly every `interval()` until stopped.
+//! Runs a task after a delay, on the host's background threads
+using QuackScheduler = std::function<void(milliseconds delay, std::function<void()> task)>;
+
+//! Runs `tick` roughly every `interval()` until stopped: on the host's scheduler when there is one, otherwise on a
+//! thread of its own.
 class QuackPeriodicWorker {
 public:
 	~QuackPeriodicWorker() {
 		Stop();
 	}
 
-	void Start(std::function<milliseconds()> interval_p, std::function<void()> tick_p) {
-		D_ASSERT(!thread.joinable());
-		interval = std::move(interval_p);
-		tick = std::move(tick_p);
-		thread = std::thread(&QuackPeriodicWorker::Loop, this);
+	void Start(const QuackScheduler &scheduler, std::function<milliseconds()> interval, std::function<void()> tick) {
+		D_ASSERT(!state);
+		state = make_shared_ptr<State>();
+		state->interval = std::move(interval);
+		state->tick = std::move(tick);
+		if (scheduler) {
+			state->scheduler = scheduler;
+			Arm(state);
+		} else {
+			thread = std::thread(&QuackPeriodicWorker::Loop, state);
+		}
 	}
 
-	//! Wake the worker and join its thread
+	//! No tick starts after this returns, and a running one has finished
 	void Stop() {
+		if (!state) {
+			return;
+		}
 		{
-			lock_guard<mutex> guard(lock);
-			stopping = true;
+			lock_guard<mutex> guard(state->lock);
+			state->stopping = true;
+			auto idle = [this]() DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
+				return !state->running;
+			};
+			state->lock.Await(absl::Condition(&idle));
 		}
 		if (thread.joinable()) {
 			thread.join();
@@ -35,29 +53,61 @@ public:
 	}
 
 private:
-	void Loop() {
-		auto stopped = [this]() DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
-			return stopping;
+	struct State {
+		mutex lock;
+		bool stopping = false;
+		bool running = false;
+		std::function<milliseconds()> interval;
+		std::function<void()> tick;
+		QuackScheduler scheduler;
+	};
+
+	//! Run the tick unless the worker stopped. False once it has.
+	static bool Tick(State &state) {
+		{
+			lock_guard<mutex> guard(state.lock);
+			if (state.stopping) {
+				return false;
+			}
+			state.running = true;
+		}
+		try {
+			state.tick();
+		} catch (...) { // NOLINT: a failed tick is retried on the next one
+		}
+		lock_guard<mutex> guard(state.lock);
+		state.running = false;
+		return !state.stopping;
+	}
+
+	static void Arm(shared_ptr<State> state) {
+		auto delay = state->interval();
+		state->scheduler(delay, [state] {
+			if (Tick(*state)) {
+				Arm(state);
+			}
+		});
+	}
+
+	static void Loop(shared_ptr<State> state) {
+		auto stopped = [&state]() DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
+			return state->stopping;
 		};
 		while (true) {
 			{
-				lock_guard<mutex> guard(lock);
-				if (lock.AwaitWithTimeout(absl::Condition(&stopped), absl::FromChrono(interval()))) {
-					break;
+				lock_guard<mutex> guard(state->lock);
+				if (state->lock.AwaitWithTimeout(absl::Condition(&stopped), absl::FromChrono(state->interval()))) {
+					return;
 				}
 			}
-			try {
-				tick();
-			} catch (...) {
+			if (!Tick(*state)) {
+				return;
 			}
 		}
 	}
 
-	std::function<milliseconds()> interval;
-	std::function<void()> tick;
+	shared_ptr<State> state;
 	std::thread thread;
-	mutex lock;
-	bool stopping = false;
 };
 
 } // namespace duckdb

@@ -10,6 +10,7 @@
 #include "quack_client.hpp"
 #include "quack_secret.hpp"
 #include "quack_session_state.hpp"
+#include "quack_storage.hpp"
 #include "quack_uri.hpp"
 
 namespace duckdb {
@@ -17,6 +18,12 @@ namespace duckdb {
 milliseconds QuackHeartbeatInterval(idx_t heartbeat_timeout_seconds, RandomEngine &random) {
 	auto interval_ms = heartbeat_timeout_seconds * 1000 / 3;
 	return milliseconds(static_cast<int64_t>(interval_ms * random.NextRandom(0.8, 1.2)));
+}
+
+optional_idx QuackControlDeadline() {
+	static constexpr idx_t CONTROL_REQUEST_TIMEOUT_MS = 5000;
+	auto now = NumericCast<idx_t>(duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count());
+	return optional_idx(now + CONTROL_REQUEST_TIMEOUT_MS);
 }
 
 template <class T>
@@ -51,7 +58,10 @@ static void LoadExtraHttpHeaders(optional_ptr<ClientContext> context, DatabaseIn
 
 void QuackClientConnection::CancelQuery(hugeint_t query_uuid) const {
 	auto client = TakeClient(nullptr);
-	client->Request<SuccessResponse>(nullptr, make_uniq<CancelRequestMessage>(connection_id, query_uuid));
+	client->SetOwnerConnection(this);
+	client->Request<SuccessResponse>(nullptr, make_uniq<CancelRequestMessage>(connection_id, query_uuid),
+	                                 QuackControlDeadline());
+	client->SetOwnerConnection(nullptr);
 	StoreClient(std::move(client));
 }
 
@@ -164,19 +174,6 @@ void HttpsQuackClient::EnsureHttpParams(optional_ptr<ClientContext> context) {
 	} else if (!context) {
 		http_params->logger.reset();
 	}
-	if (teardown_request) {
-		// The final DisconnectMessage is best-effort. The transport derives its timeout from
-		// http_params->timeout, which a caller may have set very high (e.g. an hour) for long-running
-		// task dispatch. Against a gone or half-open peer at teardown that would block the destructor for
-		// the whole timeout, so cap it hard and drop retries — a couple of seconds, then give up.
-		http_params->timeout = 2;
-		http_params->timeout_usec = 0;
-		http_params->retries = 0;
-	}
-}
-
-void HttpsQuackClient::PrepareTeardownRequest() {
-	teardown_request = true;
 }
 
 string HttpsQuackClient::PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size,
@@ -187,7 +184,8 @@ string HttpsQuackClient::PostRaw(optional_ptr<ClientContext> context, const_data
 }
 
 unique_ptr<QuackMessage> HttpsQuackClient::RequestInternal(optional_ptr<ClientContext> context,
-                                                           unique_ptr<QuackMessage> request_message) {
+                                                           unique_ptr<QuackMessage> request_message,
+                                                           optional_idx deadline) {
 	D_ASSERT(request_message);
 
 	lock_guard<mutex> guard(request_mutex);
@@ -195,8 +193,7 @@ unique_ptr<QuackMessage> HttpsQuackClient::RequestInternal(optional_ptr<ClientCo
 
 	auto start_time = QuackNowMillis();
 	EncodeRequest(context, *request_message, write_stream);
-	auto response_body = PostRawLocked(write_stream.GetData(), write_stream.GetPosition(),
-	                                   context ? context->query_deadline : optional_idx());
+	auto response_body = PostRawLocked(write_stream.GetData(), write_stream.GetPosition(), deadline);
 	auto response_message = DecodeResponse(response_body);
 	auto duration_ms = QuackNowMillis() - start_time;
 
@@ -256,24 +253,26 @@ void QuackClientConnection::Close() {
 	}
 	try {
 		auto client = clients.empty() ? QuackClient::GetClient(db, uri) : std::move(clients.back());
-		// A dead peer at teardown must not block the destructor for the full request timeout (which
-		// task dispatch may have set to an hour). Bound the transport first.
-		client->PrepareTeardownRequest();
-		client->Request<SuccessResponse>(nullptr, make_uniq<DisconnectMessage>(connection_id));
+		client->Request<SuccessResponse>(nullptr, make_uniq<DisconnectMessage>(connection_id), QuackControlDeadline());
 	} catch (...) { // NOLINT: best effort, the server ends the session once its lease runs out
 	}
 }
 
 void QuackClientConnection::StartHeartbeat() {
 	auto random = make_shared_ptr<RandomEngine>();
-	heartbeat.Start([this, random] { return QuackHeartbeatInterval(heartbeat_timeout_seconds, *random); },
-	                [this] { SendHeartbeat(); });
+	heartbeat.Start(
+	    QuackStorageExtensionInfo::GetState(db).scheduler,
+	    [this, random] { return QuackHeartbeatInterval(heartbeat_timeout_seconds, *random); },
+	    [this] { SendHeartbeat(); });
 }
 
 //! A failed attempt is not terminal: the worker swallows the throw and retries next interval.
 void QuackClientConnection::SendHeartbeat() const {
 	auto client = TakeClient(nullptr);
-	client->Request<SuccessResponse>(nullptr, make_uniq<HeartbeatRequestMessage>(connection_id));
+	client->SetOwnerConnection(this);
+	client->Request<SuccessResponse>(nullptr, make_uniq<HeartbeatRequestMessage>(connection_id),
+	                                 QuackControlDeadline());
+	client->SetOwnerConnection(nullptr);
 	StoreClient(std::move(client));
 }
 
@@ -348,6 +347,11 @@ shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &co
 	ValidateClientId(client_id);
 	ValidateHeartbeatTimeout(heartbeat_timeout_seconds);
 	auto server_uri = uri;
+	auto &serves = QuackStorageExtensionInfo::GetState(*context.db).serves;
+	if (serves && serves(server_uri.Host(), server_uri.Port())) {
+		throw InvalidInputException("%s is a Quack listener of this server, which cannot connect to itself",
+		                            server_uri.Uri());
+	}
 	token = ResolveToken(context, uri, std::move(token));
 
 	// open a HTTP client to the server
@@ -414,8 +418,14 @@ unique_ptr<QuackClientWrapper> QuackClientConnection::GetClient(ClientContext &c
 }
 
 void QuackClient::NoteError(const ErrorResponse &error_response) {
-	if (error_response.MustInvalidate() && owner_connection) {
+	if (!owner_connection) {
+		return;
+	}
+	if (error_response.MustInvalidate()) {
 		owner_connection->MarkServerInvalidated();
+	}
+	if (error_response.Error().RawMessage() == QUACK_INVALID_CONNECTION_ID) {
+		owner_connection->MarkLost();
 	}
 }
 
