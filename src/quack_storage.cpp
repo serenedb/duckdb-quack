@@ -123,6 +123,16 @@ void QuackStorageExtensionInfo::RunInBackground(const DatabaseInstance &instance
 	state.scheduler(milliseconds(0), std::move(task));
 }
 
+void QuackStorageExtensionInfo::SetServes(ServesFunction serves_p) {
+	lock_guard<mutex> guard(serves_lock);
+	serves = std::move(serves_p);
+}
+
+bool QuackStorageExtensionInfo::Serves(const string &host, uint16_t port) {
+	lock_guard<mutex> guard(serves_lock);
+	return serves && serves(host, port);
+}
+
 void QuackStorageExtensionInfo::AddServer(QuackServer &server) {
 	lock_guard<mutex> guard(servers_lock);
 	servers.push_back(server);

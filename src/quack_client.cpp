@@ -406,6 +406,10 @@ shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &co
 	ValidateClientId(client_id);
 	ValidateHeartbeatTimeout(heartbeat_timeout_seconds);
 	auto server_uri = uri;
+	if (QuackStorageExtensionInfo::GetState(*context.db).Serves(server_uri.Host(), server_uri.Port())) {
+		throw InvalidInputException("%s is a Quack listener of this server, which cannot connect to itself",
+		                            server_uri.Uri());
+	}
 	token = ResolveToken(context, uri, std::move(token));
 
 	// open a HTTP client to the server
