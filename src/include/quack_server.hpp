@@ -242,6 +242,8 @@ private:
 	string server_id;
 	mutex active_connections_mutex;
 	unordered_map<string, shared_ptr<QuackConnection>> active_connections;
+	//! CONNECTs between their quack_max_sessions check and their registration
+	idx_t opening_connections = 0;
 	shared_ptr<atomic<idx_t>> live_caches = make_shared_ptr<atomic<idx_t>>(0);
 	//! Min-heap of the expiry-queue slots, at most one per connection with a cache
 	mutex cache_expiry_mutex;
