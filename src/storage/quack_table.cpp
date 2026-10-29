@@ -103,9 +103,11 @@ string QuackTableSet::GetLoadQuery() {
 	return R"(
 SELECT schema_oid, sql, 'table'
 FROM duckdb_tables()
+WHERE NOT internal
 UNION ALL
 SELECT schema_oid, view_name, 'view'
 FROM duckdb_views()
+WHERE NOT internal
 	)";
 }
 
