@@ -52,8 +52,8 @@ struct QuackScanBindData : FunctionData {
 	mutex connection_lock;
 	bool use_transaction = false;
 	bool refresh_catalog = false;
-	//! The server runs the query at bind, and the first execution reads that result. Any other execution, such as
-	//! a prepared statement's next one, runs the query.
+	//! A server that cannot only describe the query runs it at bind, and the first execution reads that result.
+	//! Any other execution, such as a prepared statement's next one, runs the query.
 	idx_t bind_statement = 0;
 	atomic<bool> bind_result_taken {false};
 	vector<unique_ptr<DataChunkWrapper>> results;

@@ -11,8 +11,8 @@
 namespace duckdb {
 
 QuackStatementRunner::QuackStatementRunner(ClientContext &context_p, shared_ptr<QuackResultStream> stream_p,
-                                           string sql_p)
-    : context(context_p), stream(std::move(stream_p)), sql(std::move(sql_p)) {
+                                           string sql_p, bool describe_only_p)
+    : context(context_p), stream(std::move(stream_p)), sql(std::move(sql_p)), describe_only(describe_only_p) {
 }
 
 QuackStatementRunner::~QuackStatementRunner() {
@@ -79,6 +79,13 @@ QuackRunState QuackStatementRunner::SubmitNext() {
 		session_state->SetStatement(stream);
 	}
 	Parse();
+	if (describe_only) {
+		describe_only = false;
+		if (Describe()) {
+			finished = true;
+			return QuackRunState::FINISHED;
+		}
+	}
 	if (next_statement == statements.size()) {
 		if (!stream->Bound()) {
 			SendLastResult();
@@ -129,18 +136,24 @@ void QuackStatementRunner::Parse() {
 	}
 }
 
+bool QuackStatementRunner::Describe() {
+	if (statements.size() != 1) {
+		return false;
+	}
+	auto signature = context.BindStatement(std::move(statements[0]));
+	next_statement = 1;
+	stream->SignalBound(std::move(signature.types), signature.names, true);
+	stream->announced_total = 0;
+	stream->buffer.Finish(stream->announced_total);
+	return true;
+}
+
 void QuackStatementRunner::SendLastResult() {
 	if (!last_result || last_result->GetNames().empty()) {
 		stream->buffer.SetError(ErrorData(ExceptionType::INVALID_INPUT, "Query did not return any columns"));
 		return;
 	}
-	// BaseQueryResult::names is a vector<Identifier>. The stream carries plain strings.
-	vector<string> result_names;
-	result_names.reserve(last_result->GetNames().size());
-	for (auto &col_name : last_result->GetNames()) {
-		result_names.push_back(col_name.GetIdentifierName());
-	}
-	stream->SignalBound(last_result->GetTypes(), std::move(result_names));
+	stream->SignalBound(last_result->GetTypes(), last_result->GetNames(), false);
 	unique_ptr<QuackChunkPayloadWriter> writer;
 	idx_t rows = 0;
 	while (auto chunk = last_result->Fetch()) {
@@ -148,7 +161,7 @@ void QuackStatementRunner::SendLastResult() {
 			continue;
 		}
 		if (!writer) {
-			writer = make_uniq<QuackChunkPayloadWriter>(0);
+			writer = make_uniq<QuackChunkPayloadWriter>(0, stream->serenedb_peer);
 		}
 		writer->AppendChunk(*chunk);
 		rows += chunk->size();
