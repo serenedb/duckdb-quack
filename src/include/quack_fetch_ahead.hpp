@@ -69,6 +69,8 @@ private:
 	hugeint_t query_uuid;
 	string connection_id;
 	optional_idx client_query_id;
+	//! The query's ClientContext::query_deadline: a FETCH still running then fails with the query's timeout
+	optional_idx deadline;
 	//! Context logger captured on the creating thread; pool threads have no ClientContext.
 	shared_ptr<Logger> logger;
 	idx_t depth;
@@ -87,6 +89,8 @@ private:
 	mutex ack_lock;
 	QuackDenseIndexSet acked;
 	atomic<bool> stop {false};
+	//! Set by the first batch: the read-ahead opens to `depth` from then on.
+	atomic<bool> received_any {false};
 	//! Set on the first empty FETCH response; no further fetches are issued.
 	atomic<bool> no_more_fetches {false};
 	//! The total the terminal FETCH response announced, INVALID_INDEX until it arrives. Finish reads

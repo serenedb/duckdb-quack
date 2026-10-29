@@ -2,6 +2,7 @@
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/common/random_engine.hpp"
+#include "duckdb/common/time_point.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
@@ -10,13 +11,38 @@
 #include "quack_client.hpp"
 #include "quack_secret.hpp"
 #include "quack_session_state.hpp"
+#include "quack_settings.hpp"
+#include "quack_storage.hpp"
 #include "quack_uri.hpp"
+
+#include <absl/cleanup/cleanup.h>
 
 namespace duckdb {
 
 milliseconds QuackHeartbeatInterval(idx_t heartbeat_timeout_seconds, RandomEngine &random) {
 	auto interval_ms = heartbeat_timeout_seconds * 1000 / 3;
 	return milliseconds(static_cast<int64_t>(interval_ms * random.NextRandom(0.8, 1.2)));
+}
+
+static optional_idx DeadlineIn(int64_t milliseconds) {
+	return optional_idx(NumericCast<idx_t>(TimePoint::Now() + TimePoint::FromNanos(milliseconds * 1000000)));
+}
+
+optional_idx QuackControlDeadline() {
+	static constexpr int64_t CONTROL_REQUEST_TIMEOUT_MS = 5000;
+	return DeadlineIn(CONTROL_REQUEST_TIMEOUT_MS);
+}
+
+optional_idx QuackStatementDeadline(ClientContext &context, optional_ptr<const QuackClientConnection> connection) {
+	if (context.query_deadline.IsValid() || !connection || !connection->SereneDBPeer()) {
+		return context.query_deadline;
+	}
+	auto timeout_ms =
+	    QuackGetUBigintSetting(context, "quack_default_statement_timeout", QUACK_DEFAULT_STATEMENT_TIMEOUT_MS_DEFAULT);
+	if (timeout_ms == 0) {
+		return optional_idx();
+	}
+	return DeadlineIn(NumericCast<int64_t>(timeout_ms));
 }
 
 template <class T>
@@ -49,14 +75,13 @@ static void LoadExtraHttpHeaders(optional_ptr<ClientContext> context, DatabaseIn
 	}
 }
 
-void QuackClientConnection::CancelQuery(hugeint_t query_uuid) {
-	lock_guard<mutex> guard(lock);
-	if (cached_clients.empty()) {
-		return;
-	}
-	// get a cached client, if any
-	auto &client = cached_clients.back();
-	client->Request<SuccessResponse>(nullptr, make_uniq<CancelRequestMessage>(connection_id, query_uuid));
+void QuackClientConnection::CancelQuery(hugeint_t query_uuid) const {
+	auto client = TakeClient(nullptr);
+	client->SetOwnerConnection(this);
+	client->Request<SuccessResponse>(nullptr, make_uniq<CancelRequestMessage>(connection_id, query_uuid),
+	                                 QuackControlDeadline());
+	client->SetOwnerConnection(nullptr);
+	StoreClient(std::move(client));
 }
 
 QuackClient::QuackClient(DatabaseInstance &db_p, const QuackUri &uri_p) : db(db_p), uri(uri_p) {
@@ -118,8 +143,11 @@ HttpsQuackClient::HttpsQuackClient(DatabaseInstance &db, const QuackUri &uri_p) 
 HttpsQuackClient::~HttpsQuackClient() {
 }
 
-string HttpsQuackClient::PostRawLocked(const_data_ptr_t data, idx_t size, MessageType type) {
+string HttpsQuackClient::PostRawLocked(const_data_ptr_t data, idx_t size, optional_idx deadline, MessageType type) {
 	D_ASSERT(http_params);
+	// a request of a statement ends when the statement's time does, with the statement's timeout error
+	ClientContext::DeadlineCheck(deadline);
+	http_params->deadline = deadline;
 	auto &http_util = HTTPUtil::Get(db);
 	auto request_url = uri.Http() + "/quack";
 	HTTPHeaders headers = extra_headers;
@@ -131,6 +159,7 @@ string HttpsQuackClient::PostRawLocked(const_data_ptr_t data, idx_t size, Messag
 	try {
 		response = http_util.Request(post_request, http_client);
 	} catch (std::exception &ex) {
+		ClientContext::DeadlineCheck(deadline);
 		ErrorData error(ex);
 		throw IOException("Failed to send message: %s", error.Message());
 	}
@@ -164,29 +193,18 @@ void HttpsQuackClient::EnsureHttpParams(optional_ptr<ClientContext> context) {
 	} else if (!context) {
 		http_params->logger.reset();
 	}
-	if (teardown_request) {
-		// The final DisconnectMessage is best-effort. The transport derives its timeout from
-		// http_params->timeout, which a caller may have set very high (e.g. an hour) for long-running
-		// task dispatch. Against a gone or half-open peer at teardown that would block the destructor for
-		// the whole timeout, so cap it hard and drop retries — a couple of seconds, then give up.
-		http_params->timeout = 2;
-		http_params->timeout_usec = 0;
-		http_params->retries = 0;
-	}
 }
 
-void HttpsQuackClient::PrepareTeardownRequest() {
-	teardown_request = true;
-}
-
-string HttpsQuackClient::PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size) {
+string HttpsQuackClient::PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size,
+                                 optional_idx deadline) {
 	lock_guard<mutex> guard(request_mutex);
 	EnsureHttpParams(context);
-	return PostRawLocked(data, size, MessageType::INVALID);
+	return PostRawLocked(data, size, deadline, MessageType::INVALID);
 }
 
 unique_ptr<QuackMessage> HttpsQuackClient::RequestInternal(optional_ptr<ClientContext> context,
-                                                           unique_ptr<QuackMessage> request_message) {
+                                                           unique_ptr<QuackMessage> request_message,
+                                                           optional_idx deadline) {
 	D_ASSERT(request_message);
 
 	lock_guard<mutex> guard(request_mutex);
@@ -194,7 +212,8 @@ unique_ptr<QuackMessage> HttpsQuackClient::RequestInternal(optional_ptr<ClientCo
 
 	auto start_time = QuackNowMillis();
 	EncodeRequest(context, *request_message, write_stream, owner_connection && owner_connection->SereneDBPeer());
-	auto response_body = PostRawLocked(write_stream.GetData(), write_stream.GetPosition(), request_message->Type());
+	auto response_body =
+	    PostRawLocked(write_stream.GetData(), write_stream.GetPosition(), deadline, request_message->Type());
 	auto response_message = DecodeResponse(response_body);
 	auto duration_ms = QuackNowMillis() - start_time;
 
@@ -238,6 +257,18 @@ unique_ptr<PrepareRequestMessage> QuackClientConnection::MakePrepare(string sql,
 	return make_uniq<PrepareRequestMessage>(connection_id, std::move(sql), query_uuid);
 }
 
+unique_ptr<PrepareResponseMessage> QuackClientConnection::Prepare(ClientContext &context,
+                                                                  unique_ptr<PrepareRequestMessage> prepare) const {
+	auto query_uuid = prepare->QueryUUID();
+	auto client_wrapper = GetClient(context);
+	absl::Cleanup cancel_on_failure = [&] {
+		CancelQueryInBackground(query_uuid);
+	};
+	auto response = client_wrapper->GetClient().Request<PrepareResponseMessage>(context, std::move(prepare));
+	std::move(cancel_on_failure).Cancel();
+	return response;
+}
+
 QuackClientConnection::~QuackClientConnection() {
 	Close();
 }
@@ -247,28 +278,44 @@ void QuackClientConnection::Close() {
 		return;
 	}
 	heartbeat.Stop();
-	unique_ptr<QuackClient> client;
+	vector<unique_ptr<QuackClient>> clients;
 	{
 		lock_guard<mutex> guard(lock);
-		if (cached_clients.empty()) {
-			return;
-		}
-		client = std::move(cached_clients.back());
-		cached_clients.pop_back();
+		clients = std::move(cached_clients);
+		cached_clients.clear();
 	}
 	try {
-		// A dead peer must not block the caller for the full request timeout (which task dispatch may have
-		// set to an hour). Bound the transport first.
-		client->PrepareTeardownRequest();
-		client->Request<SuccessResponse>(nullptr, make_uniq<DisconnectMessage>(connection_id));
+		shared_ptr<QuackClient> client(clients.empty() ? QuackClient::GetClient(db, uri) : std::move(clients.back()));
+		// the session ends at the latest once its lease runs out, so nobody waits for the answer
+		QuackStorageExtensionInfo::RunInBackground(db, [client, connection_id = connection_id] {
+			try {
+				client->Request<SuccessResponse>(nullptr, make_uniq<DisconnectMessage>(connection_id),
+				                                 QuackControlDeadline());
+			} catch (...) { // NOLINT: best effort
+			}
+		});
 	} catch (...) { // NOLINT: best effort, the server ends the session once its lease runs out
+	}
+}
+
+void QuackClientConnection::CancelQueryInBackground(hugeint_t query_uuid) const {
+	try {
+		QuackStorageExtensionInfo::RunInBackground(db, [connection = shared_from_this(), query_uuid] {
+			try {
+				connection->CancelQuery(query_uuid);
+			} catch (...) { // NOLINT: best effort, the server may already be gone
+			}
+		});
+	} catch (...) { // NOLINT: best effort, destructors call it
 	}
 }
 
 void QuackClientConnection::StartHeartbeat() {
 	auto random = make_shared_ptr<RandomEngine>();
-	heartbeat.Start([this, random] { return QuackHeartbeatInterval(heartbeat_timeout_seconds, *random); },
-	                [this] { SendHeartbeat(); });
+	heartbeat.Start(
+	    QuackStorageExtensionInfo::GetState(db).scheduler,
+	    [this, random] { return QuackHeartbeatInterval(heartbeat_timeout_seconds, *random); },
+	    [this] { SendHeartbeat(); });
 }
 
 //! A failed attempt is not terminal: the worker swallows the throw and retries next interval.
@@ -278,7 +325,8 @@ void QuackClientConnection::SendHeartbeat() const {
 	}
 	auto client = TakeClient(nullptr);
 	client->SetOwnerConnection(this);
-	client->Request<SuccessResponse>(nullptr, make_uniq<HeartbeatRequestMessage>(connection_id));
+	client->Request<SuccessResponse>(nullptr, make_uniq<HeartbeatRequestMessage>(connection_id),
+	                                 QuackControlDeadline());
 	client->SetOwnerConnection(nullptr);
 	StoreClient(std::move(client));
 }
