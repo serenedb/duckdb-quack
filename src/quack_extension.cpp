@@ -76,7 +76,7 @@ static void RegisterQuackSecretType(ExtensionLoader &loader) {
 static void QuackConnectionIdFunc(const DataChunk &args, ExpressionState &state, Vector &result) {
 	auto catalog_name = args.GetValue(0, 0);
 	auto &quack_catalog = QuackCatalog::GetQuackCatalog(state.GetContext(), catalog_name);
-	result.SetValue(0, Value(quack_catalog.GetConnectionId()));
+	result.SetValue(0, Value(quack_catalog.GetClientConnection(state.GetContext())->ConnectionId()));
 }
 
 static void QuackIdentifyFun(ClientContext &, TableFunctionInput &, DataChunk &) {

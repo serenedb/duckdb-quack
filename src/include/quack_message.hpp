@@ -13,6 +13,8 @@ namespace duckdb {
 class BinaryDeserializer;
 class ClientContext;
 
+//! The error of a request on a session the server does not know
+static constexpr const char *QUACK_INVALID_CONNECTION_ID = "Invalid connection id";
 //! Quack wire-protocol version. Client and server agree on it during the connection handshake.
 static constexpr idx_t QUACK_VERSION = 3;
 

@@ -443,7 +443,7 @@ unique_ptr<QuackMessage> QuackServer::Dispatch(QuackRequest &request, QuackServe
 		if (request.header.type != MessageType::CONNECTION_REQUEST) {
 			request.connection = GetConnection(request.header.connection_id);
 			if (!request.connection) {
-				return make_uniq<ErrorResponse>("Invalid connection id");
+				return make_uniq<ErrorResponse>(QUACK_INVALID_CONNECTION_ID);
 			}
 		}
 		SweepExpiredCaches(*db);
