@@ -12,6 +12,8 @@
 #include "storage/quack_catalog.hpp"
 #include "storage/quack_table.hpp"
 
+#include <absl/cleanup/cleanup.h>
+
 namespace duckdb {
 
 //===--------------------------------------------------------------------===//
@@ -22,10 +24,10 @@ class QuackSendDataTask : public AsyncTask {
 public:
 	QuackSendDataTask(unique_ptr<QuackClientWrapper> client_wrapper_p, unique_ptr<MemoryStream> payload_p,
 	                  idx_t body_start_p, idx_t body_size_p, string connection_id_p, optional_idx client_query_id_p,
-	                  shared_ptr<Logger> logger_p, idx_t debug_delay_ms_p)
+	                  shared_ptr<Logger> logger_p, idx_t debug_delay_ms_p, optional_idx deadline_p)
 	    : client_wrapper(std::move(client_wrapper_p)), payload(std::move(payload_p)), body_start(body_start_p),
 	      body_size(body_size_p), connection_id(std::move(connection_id_p)), client_query_id(client_query_id_p),
-	      logger(std::move(logger_p)), debug_delay_ms(debug_delay_ms_p) {
+	      logger(std::move(logger_p)), debug_delay_ms(debug_delay_ms_p), deadline(deadline_p) {
 	}
 
 	void Execute() override {
@@ -38,7 +40,7 @@ public:
 		auto start_time = QuackNowMillis();
 		// context=nullptr: this thread must not touch ClientContext.
 		// The payload holds its batch index, so a retry sends the same batch again.
-		auto response_body = client.PostRaw(nullptr, payload->GetData() + body_start, body_size);
+		auto response_body = client.PostRaw(nullptr, payload->GetData() + body_start, body_size, deadline);
 		auto duration_ms = QuackNowMillis() - start_time;
 
 		auto response = QuackClient::DecodeResponse(response_body);
@@ -71,6 +73,8 @@ private:
 	optional_idx client_query_id;
 	shared_ptr<Logger> logger;
 	idx_t debug_delay_ms;
+	//! The statement's ClientContext::query_deadline
+	optional_idx deadline;
 };
 
 //===--------------------------------------------------------------------===//
@@ -145,8 +149,7 @@ public:
 	QuackSendDataEmitter(ClientContext &context, QuackTableCatalogEntry &table_p, string stream_id_p,
 	                     hugeint_t query_uuid_p, idx_t debug_delay_ms_p, bool debug_duplicate_sends_p,
 	                     idx_t debug_drop_batch_p)
-	    : context(context.shared_from_this()),
-	      session(table_p.catalog.Cast<QuackCatalog>().GetClientConnection(context)), stream_id(std::move(stream_id_p)),
+	    : session(table_p.catalog.Cast<QuackCatalog>().GetClientConnection(context)), stream_id(std::move(stream_id_p)),
 	      query_uuid(query_uuid_p), debug_delay_ms(debug_delay_ms_p), debug_duplicate_sends(debug_duplicate_sends_p),
 	      debug_drop_batch(debug_drop_batch_p) {
 		queue = make_uniq<ManagedAsyncTaskQueue>(context);
@@ -162,14 +165,7 @@ public:
 			queue->Close();
 		} catch (...) { // NOLINT: a destructor must not throw
 		}
-		try {
-			if (auto live = context.lock()) {
-				auto client_wrapper = session->GetClient(*live);
-				auto cancel = make_uniq<CancelRequestMessage>(session->ConnectionId(), query_uuid);
-				client_wrapper->GetClient().Request<SuccessResponse>(*live, std::move(cancel));
-			}
-		} catch (...) { // NOLINT: best effort
-		}
+		session->CancelQueryInBackground(query_uuid);
 	}
 
 	unique_ptr<QuackFragmentBuilder> OpenFragment(ClientContext &context, idx_t size_hint) override {
@@ -204,16 +200,17 @@ public:
 
 		auto connection_id = prepared->connection_id;
 		auto client_query_id = prepared->client_query_id;
+		auto deadline = QuackStatementDeadline(context, session.get());
 		auto client_wrapper = session->GetClient(context);
 		queue->Register(make_uniq<QuackSendDataTask>(std::move(client_wrapper), std::move(prepared->payload),
 		                                             body_start, body_size, connection_id, client_query_id,
-		                                             context.logger, debug_delay_ms),
+		                                             context.logger, debug_delay_ms, deadline),
 		                body_size);
 		if (duplicate) {
 			auto retry_wrapper = session->GetClient(context);
 			queue->Register(make_uniq<QuackSendDataTask>(std::move(retry_wrapper), std::move(duplicate), 0, body_size,
 			                                             std::move(connection_id), client_query_id, context.logger,
-			                                             debug_delay_ms),
+			                                             debug_delay_ms, deadline),
 			                body_size);
 		}
 		queue->ApplyBackpressure();
@@ -224,6 +221,10 @@ public:
 		// Drain every send first. The buffer checks the count when the terminal message arrives.
 		queue->Close();
 		queue.reset();
+		// A request that fails, such as at the statement's deadline, leaves the statement waiting on the server
+		absl::Cleanup cancel_on_failure = [&] {
+			session->CancelQueryInBackground(query_uuid);
+		};
 
 		auto client_wrapper = session->GetClient(context);
 		auto &client = client_wrapper->GetClient();
@@ -238,6 +239,7 @@ public:
 		// failure after the last batch surfaces here too.
 		auto fetch = make_uniq<FetchRequestMessage>(session->ConnectionId(), query_uuid, 1, 1);
 		auto response = client.Request<FetchResponseMessage>(context, std::move(fetch));
+		std::move(cancel_on_failure).Cancel();
 		for (auto &chunk : response->MutableResults()) {
 			if (chunk->size() > 0 && chunk->ColumnCount() > 0) {
 				return optional_idx(NumericCast<idx_t>(chunk->GetValue(0, 0).GetValue<int64_t>()));
@@ -247,7 +249,6 @@ public:
 	}
 
 private:
-	weak_ptr<ClientContext> context;
 	//! The server session the INSERT statement runs on
 	shared_ptr<QuackClientConnection> session;
 	string stream_id;

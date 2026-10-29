@@ -23,10 +23,9 @@ static unique_ptr<PrepareResponseMessage> RunRemoteQuery(ClientContext &context,
 		QuackTransaction::Get(context, QuackCatalog::GetQuackCatalog(context, catalog_name)).ForceStart();
 	}
 	auto &client_connection = *bind_data.client_connection;
-	auto client_wrapper = client_connection.GetClient(context);
 	auto prepare = client_connection.MakePrepare(bind_data.query, query_uuid);
 	prepare->SetDescribeOnly(describe_only);
-	return client_wrapper->GetClient().Request<PrepareResponseMessage>(context, std::move(prepare));
+	return client_connection.Prepare(context, std::move(prepare));
 }
 
 //! The query was a statement pushed down by the RemotePushdownOptimizer, and the server ran it (PREPARE runs the
@@ -339,9 +338,7 @@ unique_ptr<GlobalTableFunctionState> QuackScanInitGlobal(ClientContext &context,
 		check_types = true;
 	}
 	query_uuid = UUID::GenerateRandomUUID();
-	auto client_wrapper = connection->GetClient(context);
-	auto response = client_wrapper->GetClient().Request<PrepareResponseMessage>(
-	    context, connection->MakePrepare(std::move(query), query_uuid));
+	auto response = connection->Prepare(context, connection->MakePrepare(std::move(query), query_uuid));
 	if (check_types && response->Types() != bind_data.column_types) {
 		throw InvalidInputException("The result of the remote query \"%s\" changed its types since it was bound",
 		                            bind_data.query);

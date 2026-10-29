@@ -23,6 +23,14 @@ optional_idx QuackActiveClientQueryId(ClientContext &context);
 //! How long to wait between two heartbeats of a lease of `heartbeat_timeout_seconds`, with jitter
 milliseconds QuackHeartbeatInterval(idx_t heartbeat_timeout_seconds, RandomEngine &random);
 
+//! The deadline of a heartbeat, a cancel or a disconnect: none waits for a statement, so a peer that does not
+//! answer in this time is gone
+optional_idx QuackControlDeadline();
+
+//! The deadline of a request of the statement `context` runs on `connection`: the statement's own one, or for a
+//! statement without one sent to a SereneDB server, quack_default_statement_timeout from now
+optional_idx QuackStatementDeadline(ClientContext &context, optional_ptr<const QuackClientConnection> connection);
+
 class QuackClient {
 public:
 	explicit QuackClient(DatabaseInstance &db_p, const QuackUri &uri_p);
@@ -30,7 +38,15 @@ public:
 
 	template <class TARGET>
 	unique_ptr<TARGET> Request(optional_ptr<ClientContext> context, unique_ptr<QuackMessage> request_message) {
-		auto response_message = RequestInternal(context, std::move(request_message));
+		return Request<TARGET>(context, std::move(request_message),
+		                       context ? QuackStatementDeadline(*context, owner_connection) : optional_idx());
+	}
+
+	//! A request still running at `deadline` (a TimePoint::Now() tick, as ClientContext::query_deadline) fails
+	template <class TARGET>
+	unique_ptr<TARGET> Request(optional_ptr<ClientContext> context, unique_ptr<QuackMessage> request_message,
+	                           optional_idx deadline) {
+		auto response_message = RequestInternal(context, std::move(request_message), deadline);
 		if (response_message->Type() != TARGET::TYPE) {
 			if (response_message->Type() == MessageType::ERROR_RESPONSE) {
 				// if we get an error throw it immediately
@@ -55,14 +71,10 @@ public:
 	//! POST already-serialized request bytes and return the raw response body, throwing on transport failure.
 	//! Lets an async sender serialize on a producer thread and perform the blocking POST from the ASYNC pool;
 	//! pass context=nullptr when called off the execution thread (parameters fall back to the database).
-	virtual string PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size) = 0;
-
-	//! Best-effort teardown hint: bound the transport for subsequent (final DisconnectMessage) requests so a
-	//! gone/half-open peer cannot block the destructor for the full, possibly hour-long, request timeout.
-	//! Default no-op; the HTTPS client caps the timeout and skips retries. Not thread-safe — call on a client
-	//! that is being torn down and will issue at most one more request.
-	virtual void PrepareTeardownRequest() {
-	}
+	//! A request still running at `deadline`, the statement's ClientContext::query_deadline, fails with the
+	//! statement's timeout error.
+	virtual string PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size,
+	                       optional_idx deadline) = 0;
 
 	//! Encode a request (inject client_query_id when a query is active, then serialize) into `out`.
 	//! Protocol-level and lock-free; the caller owns `out` and any locking around it.
@@ -116,7 +128,8 @@ protected:
 
 private:
 	virtual unique_ptr<QuackMessage> RequestInternal(optional_ptr<ClientContext> context,
-	                                                 unique_ptr<QuackMessage> request_message) = 0;
+	                                                 unique_ptr<QuackMessage> request_message,
+	                                                 optional_idx deadline) = 0;
 };
 
 class QuackClientConnection : public enable_shared_from_this<QuackClientConnection> {
@@ -126,12 +139,17 @@ public:
 	                               idx_t heartbeat_timeout_seconds_p, idx_t max_connections_cached);
 	~QuackClientConnection();
 
-	void CancelQuery(hugeint_t query_uuid);
+	void CancelQuery(hugeint_t query_uuid) const;
+	//! CancelQuery off the calling thread, for a caller that does not wait for the answer
+	void CancelQueryInBackground(hugeint_t query_uuid) const;
 	//! End the session on the server. A closed connection refuses every later request.
 	void Close();
 
 	//! The PREPARE of `sql` on this connection
 	unique_ptr<PrepareRequestMessage> MakePrepare(string sql, hugeint_t query_uuid) const;
+	//! Send `prepare`. One that fails, such as at the statement's deadline, can leave its statement running on the
+	//! server, so it cancels the statement.
+	unique_ptr<PrepareResponseMessage> Prepare(ClientContext &context, unique_ptr<PrepareRequestMessage> prepare) const;
 	//! The PREPAREs made on this connection. Each one stops the statement the server ran before it.
 	idx_t StatementsStarted() const {
 		return statements_started;
@@ -228,14 +246,14 @@ public:
 	HttpsQuackClient(DatabaseInstance &db, const QuackUri &uri_p);
 	~HttpsQuackClient() override;
 
-	string PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size) override;
-	void PrepareTeardownRequest() override;
+	string PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size,
+	               optional_idx deadline) override;
 
 private:
 	unique_ptr<QuackMessage> RequestInternal(optional_ptr<ClientContext> context,
-	                                         unique_ptr<QuackMessage> request_message) override;
+	                                         unique_ptr<QuackMessage> request_message, optional_idx deadline) override;
 	//! POST bytes assuming request_mutex is already held. A CONNECTION_REQUEST carries QUACK_SERENEDB_HEADER.
-	string PostRawLocked(const_data_ptr_t data, idx_t size, MessageType type);
+	string PostRawLocked(const_data_ptr_t data, idx_t size, optional_idx deadline, MessageType type);
 	//! Lazily initialise http_params (context-aware) and attach request_logger; assumes request_mutex is held.
 	void EnsureHttpParams(optional_ptr<ClientContext> context);
 
@@ -247,9 +265,6 @@ private:
 	//! Persistent keep-alive HTTP client: reused across requests so the TCP connection (and its
 	//! warm congestion window) survives between POSTs; replaced by the retry path on dead sockets.
 	unique_ptr<HTTPClient> http_client;
-	//! Set by PrepareTeardownRequest(): cap the transport timeout and drop retries so the final
-	//! best-effort DisconnectMessage cannot hang the destructor on a dead peer.
-	bool teardown_request = false;
 };
 
 } // namespace duckdb

@@ -181,6 +181,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "omit heartbeat_timeout",
 	                          LogicalType::UBIGINT, Value::UBIGINT(60), ValidateHeartbeatTimeoutSetting);
 
+	config.AddExtensionOption("quack_default_statement_timeout",
+	                          "Milliseconds a statement without statement_timeout may wait for a SereneDB Quack "
+	                          "server before it fails, so a server that is gone cannot hold it (0 = no limit)",
+	                          LogicalType::UBIGINT, Value::UBIGINT(QUACK_DEFAULT_STATEMENT_TIMEOUT_MS_DEFAULT));
+
 	config.AddExtensionOption("quack_enable_reconnects",
 	                          "Enable reconnect support (clients acknowledge results, the server caches the last "
 	                          "result until acknowledged)",
