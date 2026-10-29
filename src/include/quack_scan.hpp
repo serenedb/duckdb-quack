@@ -1,5 +1,6 @@
 #pragma once
 
+#include "duckdb/common/mutex.hpp"
 #include "duckdb/parser/qualified_name.hpp"
 #include "quack_uri.hpp"
 #include "quack_client.hpp"
@@ -17,6 +18,10 @@ struct QuackScanBindData : FunctionData {
 	unique_ptr<FunctionData> Copy() const override {
 		auto result = make_uniq<QuackScanBindData>();
 		result->client_connection = client_connection;
+		result->server_uri = server_uri;
+		result->token = token;
+		result->client_id = client_id;
+		result->heartbeat_timeout = heartbeat_timeout;
 		result->qualified_table_name = qualified_table_name;
 		result->column_names = column_names;
 		result->column_types = column_types;
@@ -39,6 +44,12 @@ struct QuackScanBindData : FunctionData {
 	string query;
 	//! The attached database the scan runs in. Null when the scan has its own connection
 	Value catalog_name;
+	//! The scan's own connection, as quack_query opened it: a run opens it again once the server lost it
+	QuackUri server_uri;
+	string token;
+	string client_id;
+	idx_t heartbeat_timeout = 0;
+	mutex connection_lock;
 	bool use_transaction = false;
 	bool refresh_catalog = false;
 	//! The server runs the query at bind, and the first execution reads that result. Any other execution, such as
@@ -46,6 +57,7 @@ struct QuackScanBindData : FunctionData {
 	idx_t bind_statement = 0;
 	atomic<bool> bind_result_taken {false};
 	vector<unique_ptr<DataChunkWrapper>> results;
+	//! The session the scan was bound on. A run takes the session its database has then (see QuackScanInitGlobal)
 	shared_ptr<QuackClientConnection> client_connection;
 	optional_ptr<TableCatalogEntry> table_entry;
 	bool needs_more_fetch = true;
