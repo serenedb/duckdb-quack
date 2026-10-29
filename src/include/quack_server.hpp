@@ -106,6 +106,9 @@ struct QuackConnection {
 	//! The slot outlives any one cache: the sweep re-queues it while a cache exists and releases it otherwise.
 	bool cache_in_expiry_queue = false;
 
+	//! The client connected with QUACK_SERENEDB_HEADER: the responses may carry the SereneDB fields
+	bool serenedb_client = false;
+
 	//! Stable per-client reconnect key: HMAC-SHA256(server_hmac_key, client_id). Intentionally excludes
 	//! connection_id so it stays identical across (re)connections for the same client_id. Empty if no client_id.
 	string client_id_hash;
@@ -143,8 +146,9 @@ struct CacheExpiresLater {
 
 //! One request: its body, where its handling stands while it waits on a statement, and the response.
 struct QuackRequest {
-	//! `body` reads the request bytes and must outlive the request.
-	explicit QuackRequest(ReadStream &body) : body(body) {
+	//! `body` reads the request bytes and must outlive the request. `serenedb_client`: the request carries
+	//! QUACK_SERENEDB_HEADER.
+	QuackRequest(ReadStream &body, bool serenedb_client) : body(body), serenedb_client(serenedb_client) {
 	}
 
 	//! A PREPARE answers with the rows it has instead of waiting for quack_prepare_inline_rows, so a long
@@ -169,6 +173,7 @@ struct QuackRequest {
 	enum class Phase : uint8_t { DECODE, START, WAIT_BOUND, DRAIN, FETCH, SEND, DONE };
 
 	ReadStream &body;
+	bool serenedb_client;
 	Phase phase = Phase::DECODE;
 	MessageHeader header {MessageType::INVALID, string()};
 	unique_ptr<QuackMessage> message;

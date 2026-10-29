@@ -15,9 +15,9 @@
 #include <queue>
 namespace duckdb {
 
-//! Run the query of `bind_data` on the server
+//! Run the query of `bind_data` on the server, or with `describe_only` ask for its columns only
 static unique_ptr<PrepareResponseMessage> RunRemoteQuery(ClientContext &context, QuackScanBindData &bind_data,
-                                                         hugeint_t query_uuid) {
+                                                         hugeint_t query_uuid, bool describe_only = false) {
 	if (bind_data.use_transaction) {
 		auto catalog_name = bind_data.catalog_name;
 		QuackTransaction::Get(context, QuackCatalog::GetQuackCatalog(context, catalog_name)).ForceStart();
@@ -25,6 +25,7 @@ static unique_ptr<PrepareResponseMessage> RunRemoteQuery(ClientContext &context,
 	auto &client_connection = *bind_data.client_connection;
 	auto client_wrapper = client_connection.GetClient(context);
 	auto prepare = client_connection.MakePrepare(bind_data.query, query_uuid);
+	prepare->SetDescribeOnly(describe_only);
 	return client_wrapper->GetClient().Request<PrepareResponseMessage>(context, std::move(prepare));
 }
 
@@ -35,11 +36,13 @@ static void InvalidateCatalog(ClientContext &context, QuackScanBindData &bind_da
 	QuackCatalog::GetQuackCatalog(context, catalog_name).Invalidate();
 }
 
-//! Learn the query's columns from the server, which runs it: the first execution then reads that result.
+//! Learn the query's columns from the server. A server that cannot describe it runs it, and the first execution
+//! then reads that result.
 static void BindRemoteQuery(ClientContext &context, QuackScanBindData &bind_data, vector<LogicalType> &return_types,
                             vector<Identifier> &names) {
 	bind_data.query_uuid = UUID::GenerateRandomUUID();
-	auto bind_response = RunRemoteQuery(context, bind_data, bind_data.query_uuid);
+	auto describe = bind_data.client_connection->SereneDBPeer();
+	auto bind_response = RunRemoteQuery(context, bind_data, bind_data.query_uuid, describe);
 	bind_data.bind_statement = bind_data.client_connection->StatementsStarted();
 
 	return_types = bind_response->Types();
@@ -52,6 +55,12 @@ static void BindRemoteQuery(ClientContext &context, QuackScanBindData &bind_data
 	// referenced positionally everywhere below, so this is purely the name we expose to the binder.
 	QueryResult::DeduplicateColumns(names);
 
+	if (bind_response->Described()) {
+		// nothing ran on the server, so every execution runs the query
+		bind_data.bind_result_taken = true;
+		bind_data.completed = true;
+		return;
+	}
 	bind_data.results = std::move(bind_response->MutableResults());
 	bind_data.needs_more_fetch = bind_response->NeedsMoreFetch();
 	bind_data.query_uuid = bind_response->QueryUUID();

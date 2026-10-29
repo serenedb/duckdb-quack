@@ -140,6 +140,7 @@ QuackFetcher::QuackFetcher(ClientContext &context, QuackClientConnection &connec
 	buffer = make_shared_ptr<QuackFetchBuffer>();
 
 	this->query_uuid = query_uuid;
+	this->connection = connection.shared_from_this();
 	connection_id = connection.ConnectionId();
 	logger = context.logger;
 	// Read once: the async tasks read it together, and it belongs to this query.
@@ -222,7 +223,7 @@ void QuackFetcher::TopUp(ClientContext &context) {
 		auto request_index = next_request++;
 		FetchRequestMessage fetch_msg(connection_id, query_uuid, request_index, CurrentAck());
 		auto request_payload = make_uniq<MemoryStream>();
-		QuackClient::EncodeRequest(context, fetch_msg, *request_payload);
+		QuackClient::EncodeRequest(context, fetch_msg, *request_payload, connection->SereneDBPeer());
 		auto request_size = request_payload->GetPosition();
 		queue->Register(make_uniq<QuackFetchDataTask>(*this, std::move(client), request_index,
 		                                              std::move(request_payload), request_size),

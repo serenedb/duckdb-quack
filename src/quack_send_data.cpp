@@ -91,7 +91,7 @@ struct QuackPreparedSendData : public QuackPreparedBatch {
 class QuackSendDataFragmentBuilder : public QuackFragmentBuilder {
 public:
 	QuackSendDataFragmentBuilder(ClientContext &context, const string &connection_id_p, const string &stream_id_p,
-	                             idx_t size_hint)
+	                             idx_t size_hint, bool serenedb_peer)
 	    : connection_id(connection_id_p), stream_id(stream_id_p) {
 		// Fail before the first batch when the ids cannot fit. 64 covers the fixed fields at max width.
 		if (64 + connection_id.size() + stream_id.size() > QUACK_PAYLOAD_HEADER_BYTES) {
@@ -99,7 +99,7 @@ public:
 		}
 		// The same client_query_id that QuackClient::EncodeRequest adds, taken while a context exists.
 		client_query_id = QuackActiveClientQueryId(context);
-		writer = make_uniq<QuackChunkPayloadWriter>(size_hint);
+		writer = make_uniq<QuackChunkPayloadWriter>(size_hint, serenedb_peer);
 	}
 
 	void Append(ClientContext &context, DataChunk &chunk) override {
@@ -173,7 +173,8 @@ public:
 	}
 
 	unique_ptr<QuackFragmentBuilder> OpenFragment(ClientContext &context, idx_t size_hint) override {
-		return make_uniq<QuackSendDataFragmentBuilder>(context, session->ConnectionId(), stream_id, size_hint);
+		return make_uniq<QuackSendDataFragmentBuilder>(context, session->ConnectionId(), stream_id, size_hint,
+		                                               session->SereneDBPeer());
 	}
 
 	//! Always true: the queue does not refuse work. ApplyBackpressure holds the producer thread.
@@ -185,7 +186,7 @@ public:
 		header_message.SetChunkCount(prepared->chunk_count);
 		header_message.SetBatchIndex(dense_index);
 		header_message.SetClientQueryId(prepared->client_query_id);
-		auto body_start = QuackPrependHeader(*prepared->payload, header_message);
+		auto body_start = QuackPrependHeader(*prepared->payload, header_message, session->SereneDBPeer());
 		auto body_size = prepared->payload_size - body_start;
 
 		// DEBUG SETTING: lose one batch on purpose. The terminal message announces the full count, so

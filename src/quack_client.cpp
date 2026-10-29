@@ -76,7 +76,8 @@ optional_idx QuackActiveClientQueryId(ClientContext &context) {
 	return optional_idx(raw_query_id);
 }
 
-void QuackClient::EncodeRequest(optional_ptr<ClientContext> context, QuackMessage &message, MemoryStream &out) {
+void QuackClient::EncodeRequest(optional_ptr<ClientContext> context, QuackMessage &message, MemoryStream &out,
+                                bool serenedb_peer) {
 	if (context) {
 		// Inject client_query_id from the active query so client and server logs correlate.
 		auto client_query_id = QuackActiveClientQueryId(*context);
@@ -84,7 +85,7 @@ void QuackClient::EncodeRequest(optional_ptr<ClientContext> context, QuackMessag
 			message.SetClientQueryId(client_query_id);
 		}
 	}
-	message.ToMemoryStream(out);
+	message.ToMemoryStream(out, serenedb_peer);
 }
 
 unique_ptr<QuackMessage> QuackClient::DecodeResponse(const string &response_body) {
@@ -117,11 +118,14 @@ HttpsQuackClient::HttpsQuackClient(DatabaseInstance &db, const QuackUri &uri_p) 
 HttpsQuackClient::~HttpsQuackClient() {
 }
 
-string HttpsQuackClient::PostRawLocked(const_data_ptr_t data, idx_t size) {
+string HttpsQuackClient::PostRawLocked(const_data_ptr_t data, idx_t size, MessageType type) {
 	D_ASSERT(http_params);
 	auto &http_util = HTTPUtil::Get(db);
 	auto request_url = uri.Http() + "/quack";
 	HTTPHeaders headers = extra_headers;
+	if (type == MessageType::CONNECTION_REQUEST) {
+		headers.Insert(QUACK_SERENEDB_HEADER, "1");
+	}
 	PostRequestInfo post_request(request_url, headers, *http_params, data, size);
 	unique_ptr<HTTPResponse> response;
 	try {
@@ -178,7 +182,7 @@ void HttpsQuackClient::PrepareTeardownRequest() {
 string HttpsQuackClient::PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size) {
 	lock_guard<mutex> guard(request_mutex);
 	EnsureHttpParams(context);
-	return PostRawLocked(data, size);
+	return PostRawLocked(data, size, MessageType::INVALID);
 }
 
 unique_ptr<QuackMessage> HttpsQuackClient::RequestInternal(optional_ptr<ClientContext> context,
@@ -189,8 +193,8 @@ unique_ptr<QuackMessage> HttpsQuackClient::RequestInternal(optional_ptr<ClientCo
 	EnsureHttpParams(context);
 
 	auto start_time = QuackNowMillis();
-	EncodeRequest(context, *request_message, write_stream);
-	auto response_body = PostRawLocked(write_stream.GetData(), write_stream.GetPosition());
+	EncodeRequest(context, *request_message, write_stream, owner_connection && owner_connection->SereneDBPeer());
+	auto response_body = PostRawLocked(write_stream.GetData(), write_stream.GetPosition(), request_message->Type());
 	auto response_message = DecodeResponse(response_body);
 	auto duration_ms = QuackNowMillis() - start_time;
 
@@ -219,10 +223,11 @@ unique_ptr<QuackClient> QuackClient::GetClient(ClientContext &context, const Qua
 }
 
 QuackClientConnection::QuackClientConnection(DatabaseInstance &db_p, unique_ptr<QuackClient> client_p, QuackUri uri_p,
-                                             string connection_id_p, idx_t heartbeat_timeout_seconds_p,
-                                             idx_t max_connections_cached_p)
-    : db(db_p), uri(std::move(uri_p)), connection_id(std::move(connection_id_p)),
-      heartbeat_timeout_seconds(heartbeat_timeout_seconds_p), max_connections_cached(max_connections_cached_p) {
+                                             string connection_id_p, idx_t quack_version_p, bool serenedb_peer_p,
+                                             idx_t heartbeat_timeout_seconds_p, idx_t max_connections_cached_p)
+    : db(db_p), uri(std::move(uri_p)), connection_id(std::move(connection_id_p)), quack_version(quack_version_p),
+      serenedb_peer(serenedb_peer_p), heartbeat_timeout_seconds(heartbeat_timeout_seconds_p),
+      max_connections_cached(max_connections_cached_p) {
 	if (client_p) {
 		StoreClient(std::move(client_p));
 	}
@@ -357,10 +362,11 @@ shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &co
 	// submit the connection request
 	auto connection_request_response = client->Request<ConnectionResponseMessage>(
 	    context, make_uniq<ConnectionRequestMessage>(token, std::move(client_id), heartbeat_timeout_seconds));
-	// Validate the server's selected protocol version before trusting the connection (client speaks QUACK_VERSION).
-	if (connection_request_response->QuackVersion() != QUACK_VERSION) {
-		throw IOException("Incompatible Quack protocol version: server uses %llu, client supports %llu",
-		                  connection_request_response->QuackVersion(), QUACK_VERSION);
+	// Validate the server's selected protocol version before trusting the connection.
+	auto quack_version = connection_request_response->QuackVersion();
+	if (quack_version < QUACK_MIN_VERSION || quack_version > QUACK_VERSION) {
+		throw IOException("Incompatible Quack protocol version: server uses %llu, client supports %llu to %llu",
+		                  quack_version, QUACK_MIN_VERSION, QUACK_VERSION);
 	}
 	auto accepted_heartbeat_timeout_seconds = connection_request_response->HeartbeatTimeoutSeconds();
 	ValidateHeartbeatTimeout(accepted_heartbeat_timeout_seconds);
@@ -370,6 +376,7 @@ shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &co
 	// clients than ever POST concurrently, and each cached client pins a server connection slot.
 	idx_t pool_size = MaxValue<idx_t>(1, (idx_t)TaskScheduler::GetScheduler(context).NumberOfAsyncThreads());
 	return make_shared_ptr<QuackClientConnection>(*context.db, std::move(client), server_uri, std::move(connection_id),
+	                                              quack_version, connection_request_response->SereneDB(),
 	                                              accepted_heartbeat_timeout_seconds, pool_size);
 }
 

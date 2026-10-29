@@ -33,7 +33,8 @@ enum class QuackRunState : uint8_t {
 //! drives it slice by slice, so no thread waits on the statement.
 class QuackStatementRunner {
 public:
-	QuackStatementRunner(ClientContext &context, shared_ptr<QuackResultStream> stream, string sql);
+	//! With `describe_only`, a single statement is bound and not run
+	QuackStatementRunner(ClientContext &context, shared_ptr<QuackResultStream> stream, string sql, bool describe_only);
 	~QuackStatementRunner();
 
 	//! Run one slice. `on_reschedule` fires, from any thread, once a BLOCKED statement can go on.
@@ -48,6 +49,9 @@ private:
 	void Parse();
 	//! Submit the next statement, or close the stream after the last one
 	QuackRunState SubmitNext();
+	//! Bind the statement and close the stream with its columns. False when the command expands to several
+	//! statements: binding a later one can need the earlier ones run.
+	bool Describe();
 	//! The statements returned no rows: the last one's Success/Count result becomes batch 1
 	void SendLastResult();
 	void Fail(ErrorData error);
@@ -55,6 +59,7 @@ private:
 	ClientContext &context;
 	shared_ptr<QuackResultStream> stream;
 	string sql;
+	bool describe_only;
 	bool parsed = false;
 	vector<unique_ptr<SQLStatement>> statements;
 	idx_t next_statement = 0;

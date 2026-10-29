@@ -393,7 +393,8 @@ void QuackServer::Finish(QuackRequest &request, unique_ptr<QuackMessage> respons
 		request.response_size = raw->GetPosition() - body_start;
 		return;
 	}
-	request.response->ToMemoryStream(request.response_stream);
+	auto serenedb_client = request.connection ? request.connection->serenedb_client : request.serenedb_client;
+	request.response->ToMemoryStream(request.response_stream, serenedb_client);
 	request.response_data = request.response_stream.GetData();
 	request.response_size = request.response_stream.GetPosition();
 }
@@ -484,11 +485,13 @@ unique_ptr<QuackMessage> QuackServer::Dispatch(QuackRequest &request, QuackServe
 
 unique_ptr<QuackMessage> QuackServer::Connect(QuackRequest &request, QuackServerHost &host) {
 	auto &connection_request_message = request.message->Cast<ConnectionRequestMessage>();
-	// The server speaks exactly QUACK_VERSION; reject unless the client's [min, max] range includes it.
-	if (connection_request_message.MinimumSupportedQuackVersion() > QUACK_VERSION ||
-	    connection_request_message.MaximumSupportedQuackVersion() < QUACK_VERSION) {
-		return make_uniq<ErrorResponse>(StringUtil::Format(
-		    "Unsupported Quack version - server only supports version %llu of quack", QUACK_VERSION));
+	// Speak the newest version both sides know; reject when the client's [min, max] range misses ours.
+	auto quack_version = MinValue(connection_request_message.MaximumSupportedQuackVersion(), QUACK_VERSION);
+	if (connection_request_message.MinimumSupportedQuackVersion() > quack_version ||
+	    quack_version < QUACK_MIN_VERSION) {
+		return make_uniq<ErrorResponse>(
+		    StringUtil::Format("Unsupported Quack version - server only supports versions %llu to %llu of quack",
+		                       QUACK_MIN_VERSION, QUACK_VERSION));
 	}
 	auto heartbeat_timeout_seconds = connection_request_message.HeartbeatTimeoutSeconds();
 	if (heartbeat_timeout_seconds == 0 || heartbeat_timeout_seconds > MAX_HEARTBEAT_TIMEOUT_SECONDS) {
@@ -503,6 +506,7 @@ unique_ptr<QuackMessage> QuackServer::Connect(QuackRequest &request, QuackServer
 	auto connection =
 	    make_shared_ptr<QuackConnection>(connection_id, heartbeat_timeout_seconds, std::move(host_session));
 	connection->live_caches = live_caches;
+	connection->serenedb_client = request.serenedb_client;
 	if (!connection_request_message.ClientId().empty()) {
 		connection->client_id_hash = ComputeClientHash(server_hmac_key, connection_request_message.ClientId());
 	}
@@ -511,7 +515,9 @@ unique_ptr<QuackMessage> QuackServer::Connect(QuackRequest &request, QuackServer
 		D_ASSERT(active_connections.find(connection_id) == active_connections.end());
 		active_connections[connection_id] = std::move(connection);
 	}
-	return make_uniq<ConnectionResponseMessage>(connection_id, heartbeat_timeout_seconds);
+	auto response = make_uniq<ConnectionResponseMessage>(connection_id, quack_version, heartbeat_timeout_seconds);
+	response->SetSereneDB(request.serenedb_client);
+	return std::move(response);
 }
 
 unique_ptr<QuackMessage> QuackServer::Prepare(QuackRequest &request, const QuackWaker &waker) {
@@ -549,10 +555,12 @@ unique_ptr<QuackMessage> QuackServer::Prepare(QuackRequest &request, const Quack
 			connection.query_started_at = Timestamp::GetCurrentTimestamp();
 		}
 
-		request.stream = make_shared_ptr<QuackResultStream>(QuackServerStreamBufferBytes(*db));
+		request.stream =
+		    make_shared_ptr<QuackResultStream>(QuackServerStreamBufferBytes(*db), connection.serenedb_client);
 		// Internal catalog traffic carries uuid 0. It must never displace the client's retained result.
+		// A describe has no rows to keep
 		bool client_query = prepare_request_message.QueryUUID() != hugeint_t {0, 0};
-		request.retain_result = client_query && ServerCachingEnabled(*db);
+		request.retain_result = client_query && !prepare_request_message.DescribeOnly() && ServerCachingEnabled(*db);
 		if (request.retain_result) {
 			// hold every served payload, instead of releasing it once the client acks
 			request.stream->RetainAll();
@@ -567,8 +575,8 @@ unique_ptr<QuackMessage> QuackServer::Prepare(QuackRequest &request, const Quack
 		// A statement that reads a client stream cannot bind its result before the client sends. The scan finds
 		// the stream through the session state, which the runner points at it, and raises it, so PREPARE stops
 		// waiting.
-		connection.host_session->Run(
-		    make_uniq<QuackStatementRunner>(context, request.stream, prepare_request_message.Query()));
+		connection.host_session->Run(make_uniq<QuackStatementRunner>(
+		    context, request.stream, prepare_request_message.Query(), prepare_request_message.DescribeOnly()));
 
 		// Put the leading batches in the PREPARE response, so a small result needs one round trip
 		// only. The FETCH indices then move down by the count this drain consumed.
@@ -615,7 +623,7 @@ unique_ptr<QuackMessage> QuackServer::Prepare(QuackRequest &request, const Quack
 				FetchResponseMessage header_message;
 				header_message.SetChunkCount(entry.chunk_count);
 				header_message.SetBatchIndex(request.consumed);
-				auto body_start = QuackPrependHeader(*entry.payload, header_message);
+				auto body_start = QuackPrependHeader(*entry.payload, header_message, stream.serenedb_peer);
 				stream.Retain(request.consumed, std::move(entry.payload), body_start, entry.rows);
 			}
 			continue;
@@ -653,8 +661,10 @@ unique_ptr<QuackMessage> QuackServer::Prepare(QuackRequest &request, const Quack
 		connection.MarkQueryFinished();
 	}
 	auto columns = stream.GetColumns();
-	return make_uniq<PrepareResponseMessage>(columns.types, columns.names, std::move(request.results), needs_more_fetch,
-	                                         prepare_request_message.QueryUUID());
+	auto response = make_uniq<PrepareResponseMessage>(columns.types, columns.names, std::move(request.results),
+	                                                  needs_more_fetch, prepare_request_message.QueryUUID());
+	response->SetDescribed(columns.described);
+	return std::move(response);
 }
 
 unique_ptr<QuackMessage> QuackServer::Fetch(QuackRequest &request, const QuackWaker &waker) {
@@ -728,7 +738,7 @@ unique_ptr<QuackMessage> QuackServer::Fetch(QuackRequest &request, const QuackWa
 					FetchResponseMessage header_message;
 					header_message.SetChunkCount(entry.chunk_count);
 					header_message.SetBatchIndex(fetch_request_message.BatchIndex());
-					served_start = QuackPrependHeader(*entry.payload, header_message);
+					served_start = QuackPrependHeader(*entry.payload, header_message, stream.serenedb_peer);
 					shared_ptr<MemoryStream> payload(std::move(entry.payload));
 					stream.served.emplace(request.dense_index,
 					                      QuackResultStream::RetainedPayload {payload, served_start, entry.rows});

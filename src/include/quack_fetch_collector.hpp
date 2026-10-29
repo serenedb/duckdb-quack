@@ -34,16 +34,20 @@ using QuackFetchPayloadBuffer = QuackClaimBuffer<QuackFetchPayload>;
 //! Server state for one client-facing result. The fetch collector fills the claim buffer with sealed
 //! payloads, out of order and under a byte limit. The FETCH handlers drain it.
 struct QuackResultStream {
-	explicit QuackResultStream(idx_t capacity_bytes) : buffer(capacity_bytes) {
+	QuackResultStream(idx_t capacity_bytes, bool serenedb_peer) : buffer(capacity_bytes), serenedb_peer(serenedb_peer) {
 	}
 
 	QuackFetchPayloadBuffer buffer;
+	//! The client is a SereneDB one: the payloads and their headers are written in its format
+	const bool serenedb_peer;
 
-	void SignalBound(vector<LogicalType> types_p, vector<string> names_p) {
+	//! The statement's columns. With `described_p`, a describe-only PREPARE bound the statement and did not run it.
+	void SignalBound(vector<LogicalType> types_p, vector<string> names_p, bool described_p) {
 		{
 			lock_guard<mutex> guard(bind_lock);
 			types = std::move(types_p);
 			names = std::move(names_p);
+			described = described_p;
 			bound = true;
 		}
 		buffer.NotifyChange();
@@ -52,11 +56,12 @@ struct QuackResultStream {
 	struct Columns {
 		vector<LogicalType> types;
 		vector<string> names;
+		bool described = false;
 	};
 	//! A copy of the columns: the statement may still bind while PREPARE answers
 	Columns GetColumns() {
 		lock_guard<mutex> guard(bind_lock);
-		return Columns {types, names};
+		return Columns {types, names, described};
 	}
 
 	//! A scan of this statement registered a client data stream. The statement gives no row until the
@@ -139,6 +144,7 @@ private:
 	bool client_data_pending = false;
 	vector<LogicalType> types;
 	vector<string> names;
+	bool described = false;
 };
 
 //! Installed in ClientConfig::get_result_collector, so the query runs in parallel into `stream`.

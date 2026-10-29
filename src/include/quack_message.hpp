@@ -15,8 +15,14 @@ class ClientContext;
 
 //! The error of a request on a session the server does not know
 static constexpr const char *QUACK_INVALID_CONNECTION_ID = "Invalid connection id";
-//! Quack wire-protocol version. Client and server agree on it during the connection handshake.
+//! The Quack wire-protocol versions this build speaks. Client and server agree on one during the connection
+//! handshake.
+static constexpr idx_t QUACK_MIN_VERSION = 3;
 static constexpr idx_t QUACK_VERSION = 3;
+//! A SereneDB client sends this header with its CONNECTION_REQUEST, which other servers ignore. A SereneDB server
+//! answers it with ConnectionResponseMessage::SereneDB, and from then on both send the SereneDB fields: the ones
+//! numbered from 16384 on, which other peers would refuse.
+static constexpr const char *QUACK_SERENEDB_HEADER = "X-SereneDB-Quack";
 
 //! Upper bound both peers enforce on the heartbeat lease timeout
 static constexpr idx_t MAX_HEARTBEAT_TIMEOUT_SECONDS = static_cast<idx_t>(NumericLimits<int64_t>::Maximum() / 1000);
@@ -79,7 +85,8 @@ struct MessageHeader {
 
 class QuackMessage {
 public:
-	virtual void ToMemoryStream(MemoryStream &write_stream) const;
+	//! `serenedb_peer`: the receiver is a SereneDB one, so the SereneDB fields may go out
+	virtual void ToMemoryStream(MemoryStream &write_stream, bool serenedb_peer) const;
 	static unique_ptr<QuackMessage> FromMemoryStream(MemoryStream &read_stream);
 
 	//! A serialized payload instead of a body. The HTTP layer sends these bytes as they are. It is
@@ -172,6 +179,14 @@ public:
 	optional_idx InlineRows() const {
 		return inline_rows;
 	}
+	//! Ask for the result's columns only: the server binds the statement and does not run it, unless it cannot
+	//! (see PrepareResponseMessage::Described).
+	void SetDescribeOnly(bool describe_only_p) {
+		describe_only = describe_only_p;
+	}
+	bool DescribeOnly() const {
+		return describe_only;
+	}
 
 public:
 	const string &Query() const {
@@ -194,6 +209,7 @@ private:
 	string sql_query;
 	hugeint_t query_uuid;
 	optional_idx inline_rows;
+	bool describe_only = false;
 };
 
 class PrepareResponseMessage : public QuackMessage {
@@ -226,6 +242,14 @@ public:
 	hugeint_t QueryUUID() const {
 		return query_uuid;
 	}
+	//! A describe-only PREPARE that the server answered without running the statement: there are no rows.
+	//! False when the server ran it after all, such as for several statements in one PREPARE.
+	void SetDescribed(bool described_p) {
+		described = described_p;
+	}
+	bool Described() const {
+		return described;
+	}
 
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<PrepareResponseMessage> Deserialize(Deserializer &deserializer);
@@ -240,6 +264,7 @@ private:
 	vector<unique_ptr<DataChunkWrapper>> results;
 	bool needs_more_fetch = false;
 	hugeint_t query_uuid;
+	bool described = false;
 };
 
 class ConnectionRequestMessage : public QuackMessage {
@@ -292,7 +317,7 @@ class ConnectionResponseMessage : public QuackMessage {
 public:
 	static constexpr MessageType TYPE = MessageType::CONNECTION_RESPONSE;
 
-	explicit ConnectionResponseMessage(string connection_id_p, idx_t heartbeat_timeout_seconds_p);
+	ConnectionResponseMessage(string connection_id_p, idx_t quack_version_p, idx_t heartbeat_timeout_seconds_p);
 
 protected:
 	ConnectionResponseMessage() : QuackMessage(TYPE) {
@@ -311,6 +336,13 @@ public:
 	idx_t HeartbeatTimeoutSeconds() const {
 		return heartbeat_timeout_seconds;
 	}
+	//! The server is a SereneDB one, and the client asked with QUACK_SERENEDB_HEADER
+	void SetSereneDB(bool serenedb_p) {
+		serenedb = serenedb_p;
+	}
+	bool SereneDB() const {
+		return serenedb;
+	}
 
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<ConnectionResponseMessage> Deserialize(Deserializer &deserializer);
@@ -320,6 +352,7 @@ private:
 	string server_platform;
 	idx_t quack_version;
 	idx_t heartbeat_timeout_seconds;
+	bool serenedb = false;
 };
 
 class FetchRequestMessage : public QuackMessage {
@@ -468,7 +501,8 @@ static constexpr idx_t QUACK_PAYLOAD_HEADER_BYTES = 256;
 class QuackChunkPayloadWriter {
 public:
 	//! capacity_hint is the previous payload's size. It is reserved, so a steady stream never grows.
-	explicit QuackChunkPayloadWriter(idx_t capacity_hint);
+	//! `serenedb_peer`: the receiver is a SereneDB one, so the chunks are written in its format
+	QuackChunkPayloadWriter(idx_t capacity_hint, bool serenedb_peer);
 	~QuackChunkPayloadWriter();
 
 	//! The caller can reuse the chunk after this call.
@@ -494,7 +528,7 @@ private:
 
 //! Writes the header back-aligned into the free space, so it ends where the blob starts. Returns
 //! where the wire body starts. (A fixed-width header would also align the blob, for zero-copy.)
-idx_t QuackPrependHeader(MemoryStream &payload, const QuackMessage &header_message);
+idx_t QuackPrependHeader(MemoryStream &payload, const QuackMessage &header_message, bool serenedb_peer);
 
 //! Reads chunk_count self-describing chunks: the mirror of QuackChunkPayloadWriter::AppendChunk.
 vector<unique_ptr<DataChunk>> DecodeQuackChunkBlob(BinaryDeserializer &deserializer, idx_t chunk_count);

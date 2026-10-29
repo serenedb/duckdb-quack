@@ -66,7 +66,8 @@ public:
 
 	//! Encode a request (inject client_query_id when a query is active, then serialize) into `out`.
 	//! Protocol-level and lock-free; the caller owns `out` and any locking around it.
-	static void EncodeRequest(optional_ptr<ClientContext> context, QuackMessage &message, MemoryStream &out);
+	static void EncodeRequest(optional_ptr<ClientContext> context, QuackMessage &message, MemoryStream &out,
+	                          bool serenedb_peer);
 
 	//! Decode a response body (owned bytes) into a message. Protocol-level and lock-free.
 	static unique_ptr<QuackMessage> DecodeResponse(const string &response_body);
@@ -121,8 +122,8 @@ private:
 class QuackClientConnection : public enable_shared_from_this<QuackClientConnection> {
 public:
 	explicit QuackClientConnection(DatabaseInstance &db_p, unique_ptr<QuackClient> client_p, QuackUri uri_p,
-	                               string connection_id_p, idx_t heartbeat_timeout_seconds_p,
-	                               idx_t max_connections_cached = 1);
+	                               string connection_id_p, idx_t quack_version_p, bool serenedb_peer_p,
+	                               idx_t heartbeat_timeout_seconds_p, idx_t max_connections_cached);
 	~QuackClientConnection();
 
 	void CancelQuery(hugeint_t query_uuid);
@@ -146,6 +147,13 @@ public:
 	}
 	const QuackUri &ServerURI() const {
 		return uri;
+	}
+	idx_t QuackVersion() const {
+		return quack_version;
+	}
+	//! The server is a SereneDB one: the requests may carry the SereneDB fields (see QUACK_SERENEDB_HEADER)
+	bool SereneDBPeer() const {
+		return serenedb_peer;
 	}
 	idx_t HeartbeatTimeoutSeconds() const {
 		return heartbeat_timeout_seconds;
@@ -184,6 +192,9 @@ private:
 	DatabaseInstance &db;
 	QuackUri uri;
 	string connection_id;
+	//! The protocol version agreed during the connection handshake
+	idx_t quack_version;
+	bool serenedb_peer;
 	//! Lease timeout accepted by the server during the connection handshake.
 	idx_t heartbeat_timeout_seconds;
 	mutable mutex lock;
@@ -223,8 +234,8 @@ public:
 private:
 	unique_ptr<QuackMessage> RequestInternal(optional_ptr<ClientContext> context,
 	                                         unique_ptr<QuackMessage> request_message) override;
-	//! POST bytes assuming request_mutex is already held.
-	string PostRawLocked(const_data_ptr_t data, idx_t size);
+	//! POST bytes assuming request_mutex is already held. A CONNECTION_REQUEST carries QUACK_SERENEDB_HEADER.
+	string PostRawLocked(const_data_ptr_t data, idx_t size, MessageType type);
 	//! Lazily initialise http_params (context-aware) and attach request_logger; assumes request_mutex is held.
 	void EnsureHttpParams(optional_ptr<ClientContext> context);
 
