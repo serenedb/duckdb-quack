@@ -256,8 +256,7 @@ void QuackClientConnection::SendHeartbeat() {
 }
 
 void QuackClient::ValidateClientId(const string &client_id) {
-	// An empty client_id means "no client_id" (opt-out); anything non-empty must carry a little entropy,
-	// mirroring the >= 4 minimum QuackServer::ValidateToken enforces on the token.
+	// An empty client_id means "no client_id" (opt-out); anything non-empty must carry a little entropy.
 	if (!client_id.empty() && client_id.size() < 4) {
 		throw InvalidInputException("client_id must be at least 4 characters long");
 	}

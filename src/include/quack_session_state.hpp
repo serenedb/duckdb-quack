@@ -36,7 +36,7 @@ public:
 		return connection_id;
 	}
 
-	//! PREPARE sets this before the statement runs.
+	//! The statement's runner sets this when it starts.
 	void SetStatement(shared_ptr<QuackResultStream> stream) {
 		lock_guard<mutex> guard(lock);
 		statement = std::move(stream);

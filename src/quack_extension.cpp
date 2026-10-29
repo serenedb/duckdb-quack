@@ -16,7 +16,6 @@
 #include "storage/quack_optimizer.hpp"
 
 #include "storage/quack_catalog.hpp"
-#include "quack_active_connections.hpp"
 #include "quack_clear_cache.hpp"
 #include "quack_client.hpp"
 #include "quack_extension.hpp"
@@ -26,6 +25,7 @@
 #include "quack_scan_from_client.hpp"
 #include "quack_secret.hpp"
 #include "quack_cancel.hpp"
+#include "quack_active_connections.hpp"
 #include "quack_storage.hpp"
 #include "quack_uri.hpp"
 
@@ -73,29 +73,6 @@ static void RegisterQuackSecretType(ExtensionLoader &loader) {
 	loader.RegisterFunction(config_fun);
 }
 
-static bool TimingSafeEqual(const string &a, const string &b) {
-	if (a.size() != b.size()) {
-		return false;
-	}
-	volatile unsigned char result = 0;
-	for (size_t i = 0; i < a.size(); i++) {
-		result |= static_cast<unsigned char>(a[i]) ^ static_cast<unsigned char>(b[i]);
-	}
-	return result == 0;
-}
-
-// pass connection id
-static void QuackAuthToken(const DataChunk &args, ExpressionState &state, Vector &result) {
-	auto client_token = args.GetValue(1, 0).GetValue<string>();
-	auto server_token = args.GetValue(2, 0).GetValue<string>();
-
-	result.SetValue(0, Value::BOOLEAN(TimingSafeEqual(client_token, server_token)));
-}
-
-static void QuackDummyAuthorization(const DataChunk &args, ExpressionState &, Vector &result) {
-	result.SetValue(0, args.GetValue(1, 0)); // choose life
-}
-
 static void QuackConnectionIdFunc(const DataChunk &args, ExpressionState &state, Vector &result) {
 	auto catalog_name = args.GetValue(0, 0);
 	auto &quack_catalog = QuackCatalog::GetQuackCatalog(state.GetContext(), catalog_name);
@@ -137,11 +114,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.SetDescription("The DuckDB 'Quack' Client/Server Protocol");
 
 	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
-	config.AddExtensionOption("quack_authentication_function", "Name of a callback function for authentication",
-	                          LogicalType::VARCHAR, Value("quack_check_token"), nullptr, SetScope::GLOBAL);
-	config.AddExtensionOption("quack_authorization_function", "Name of a callback function for authorization",
-	                          LogicalType::VARCHAR, Value("quack_nop_authorization"), nullptr, SetScope::GLOBAL);
-
 	config.AddExtensionOption("quack_prepare_inline_rows",
 	                          "Rows returned inline in the PREPARE response before the remainder is left to "
 	                          "FETCH; drains whole batches, so it may overshoot to a batch boundary",
@@ -246,20 +218,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	RegisterQuackSecretType(loader);
 
-	// the default authentication function
-	ScalarFunction quack_check_token("quack_check_token",
-	                                 {/* connection id */ LogicalType::VARCHAR, /* auth string */ LogicalType::VARCHAR,
-	                                  /* token */ LogicalType::VARCHAR},
-	                                 LogicalType::BOOLEAN, QuackAuthToken);
-	quack_check_token.SetVolatile();
-	loader.RegisterFunction(quack_check_token);
-
-	ScalarFunction rpc_authorization(
-	    "quack_nop_authorization", {/* connection id */ LogicalType::VARCHAR, /* query string */ LogicalType::VARCHAR},
-	    LogicalType::VARCHAR, QuackDummyAuthorization);
-	rpc_authorization.SetVolatile();
-	loader.RegisterFunction(rpc_authorization);
-
 	ScalarFunction quack_connection_id("quack_connection_id", {LogicalType::VARCHAR}, LogicalType::VARCHAR,
 	                                   QuackConnectionIdFunc);
 	quack_connection_id.SetVolatile();
@@ -275,11 +233,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	loader.RegisterFunction(QuackParseUriFunction::GetFunction());
 
-	// (ab)use storage extension info to store our state
-	auto ext = duckdb::make_shared_ptr<QuackStorageExtension>();
-	ext->storage_info = duckdb::make_shared_ptr<QuackStorageExtensionInfo>();
-	StorageExtension::Register(loader.GetDatabaseInstance().config, QuackStorageExtensionInfo::STORAGE_EXTENSION_KEY,
-	                           ext);
+	StorageExtension::Register(loader.GetDatabaseInstance().config, QuackStorageExtension::STORAGE_EXTENSION_KEY,
+	                           duckdb::make_shared_ptr<QuackStorageExtension>());
 
 	// whoami() contract — register the table macro directly via the default-table-macro
 	// machinery so function resolution in the body is deferred to invocation time

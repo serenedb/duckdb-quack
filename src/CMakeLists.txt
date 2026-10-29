@@ -20,6 +20,7 @@ add_library(
   quack_send_data.cpp
   quack_server.cpp
   quack_settings.cpp
+  quack_statement.cpp
   quack_storage.cpp
   quack_uri.cpp
   quack_cancel.cpp

@@ -49,7 +49,7 @@ SELECT i FROM remote.tbl ORDER BY i;
 4
 
 query I quack_db:quack_server_con
-SELECT cached_rows FROM quack_active_connections();
+SELECT cached_rows FROM (FROM quack_active_connections() WHERE connection_id <> '{harness}');
 ----
 5
 
@@ -71,7 +71,7 @@ SELECT count(*) > 0 FROM duckdb_logs_parsed('Quack') WHERE message_type = 'ACKNO
 true
 
 query I quack_db:quack_server_con
-SELECT cached_rows FROM quack_active_connections();
+SELECT cached_rows FROM (FROM quack_active_connections() WHERE connection_id <> '{harness}');
 ----
 NULL
 

@@ -7,34 +7,10 @@
 #include "quack_storage.hpp"
 #include "quack_client.hpp"
 #include "quack_secret.hpp"
-#include "quack_server.hpp"
 #include "storage/quack_catalog.hpp"
 #include "storage/quack_transaction_manager.hpp"
 
 using namespace duckdb;
-
-QuackStorageExtensionInfo &QuackStorageExtensionInfo::GetState(const DatabaseInstance &instance) {
-	auto &config = instance.config;
-	auto ext = StorageExtension::Find(config, STORAGE_EXTENSION_KEY);
-	if (!ext) {
-		throw std::runtime_error("Fatal error: couldn't find quack extension state.");
-	}
-	return *static_cast<QuackStorageExtensionInfo *>(ext->storage_info.get());
-}
-
-vector<QuackConnectionSnapshot> QuackStorageExtensionInfo::GetActiveConnectionSnaps() {
-	vector<QuackConnectionSnapshot> result;
-	std::lock_guard<std::mutex> lock(servers_mutex);
-	for (auto &server_kv : servers) {
-		auto &uri = server_kv.first;
-		auto &server = server_kv.second;
-		for (auto &snapshot : server->GetActiveConnectionSnap()) {
-			snapshot.server_id = uri;
-			result.push_back(std::move(snapshot));
-		}
-	}
-	return result;
-}
 
 //! A path is bare when it carries no host: `ATTACH 'quack:'` (or an empty path, once the "quack:" prefix
 //! has been stripped by the ATTACH binder). The endpoint then comes from the secret.
@@ -119,4 +95,36 @@ static unique_ptr<TransactionManager> QuackCreateTransactionManager(optional_ptr
 QuackStorageExtension::QuackStorageExtension() {
 	attach = QuackAttach;
 	create_transaction_manager = QuackCreateTransactionManager;
+	storage_info = make_shared_ptr<QuackStorageExtensionInfo>();
+}
+
+QuackStorageExtensionInfo &QuackStorageExtensionInfo::GetState(const DatabaseInstance &instance) {
+	auto extension = StorageExtension::Find(instance.config, QuackStorageExtension::STORAGE_EXTENSION_KEY);
+	if (!extension) {
+		throw InternalException("The quack extension is not loaded");
+	}
+	return static_cast<QuackStorageExtensionInfo &>(*extension->storage_info);
+}
+
+void QuackStorageExtensionInfo::AddServer(QuackServer &server) {
+	lock_guard<mutex> guard(servers_lock);
+	servers.push_back(server);
+}
+
+void QuackStorageExtensionInfo::RemoveServer(QuackServer &server) {
+	lock_guard<mutex> guard(servers_lock);
+	servers.erase(std::remove_if(servers.begin(), servers.end(),
+	                             [&](reference<QuackServer> entry) { return &entry.get() == &server; }),
+	              servers.end());
+}
+
+vector<QuackConnectionSnapshot> QuackStorageExtensionInfo::GetActiveConnectionSnaps() {
+	vector<QuackConnectionSnapshot> result;
+	lock_guard<mutex> guard(servers_lock);
+	for (auto &server : servers) {
+		for (auto &snapshot : server.get().GetActiveConnectionSnap()) {
+			result.push_back(std::move(snapshot));
+		}
+	}
+	return result;
 }

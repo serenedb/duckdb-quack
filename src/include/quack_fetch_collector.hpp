@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "duckdb/common/atomic.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/serializer/memory_stream.hpp"
 #include "duckdb/execution/physical_operator.hpp"
@@ -39,33 +40,33 @@ struct QuackResultStream {
 	QuackFetchPayloadBuffer buffer;
 
 	void SignalBound(vector<LogicalType> types_p, vector<string> names_p) {
+		{
+			lock_guard<mutex> guard(bind_lock);
+			types = std::move(types_p);
+			names = std::move(names_p);
+			bound = true;
+		}
+		buffer.NotifyChange();
+	}
+
+	struct Columns {
+		vector<LogicalType> types;
+		vector<string> names;
+	};
+	//! A copy of the columns: the statement may still bind while PREPARE answers
+	Columns GetColumns() {
 		lock_guard<mutex> guard(bind_lock);
-		types = std::move(types_p);
-		names = std::move(names_p);
-		bound = true;
+		return Columns {types, names};
 	}
 
 	//! A scan of this statement registered a client data stream. The statement gives no row until the
 	//! client sends its batches, so PREPARE answers now.
 	void SignalClientDataPending() {
-		lock_guard<mutex> guard(bind_lock);
-		client_data_pending = true;
-	}
-
-	//! true = the query is planned, or it waits for client data. false = it failed first. The buffer
-	//! then holds the error.
-	bool WaitBound() DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
-		auto signalled = [&]() DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
-			return bound || client_data_pending;
-		};
-		lock_guard<mutex> guard(bind_lock);
-		// The wait has a limit, so a failure the buffer reports ends it too.
-		while (!bind_lock.AwaitWithTimeout(absl::Condition(&signalled), absl::Milliseconds(50))) {
-			if (buffer.HasError() || buffer.Exhausted()) {
-				return false;
-			}
+		{
+			lock_guard<mutex> guard(bind_lock);
+			client_data_pending = true;
 		}
-		return true;
+		buffer.NotifyChange();
 	}
 
 	bool Bound() {
@@ -73,12 +74,15 @@ struct QuackResultStream {
 		return bound;
 	}
 
-	vector<LogicalType> types;
-	vector<string> names;
-	bool client_data_pending = false;
+	//! The statement is planned, or it waits for client data: PREPARE can answer.
+	bool Answerable() {
+		lock_guard<mutex> guard(bind_lock);
+		return bound || client_data_pending;
+	}
+
 	//! The dense batches PREPARE consumed inline. FETCH subtracts this, so the client-facing indices
 	//! stay dense from 1. PREPARE writes it before the first FETCH arrives.
-	idx_t prepare_batches = 0;
+	atomic<idx_t> prepare_batches {0};
 	//! The dense batches the producer emitted. The terminal response carries it, so a short stream
 	//! fails instead of truncating.
 	optional_idx announced_total;
@@ -132,6 +136,9 @@ struct QuackResultStream {
 private:
 	mutex bind_lock;
 	bool bound = false;
+	bool client_data_pending = false;
+	vector<LogicalType> types;
+	vector<string> names;
 };
 
 //! Installed in ClientConfig::get_result_collector, so the query runs in parallel into `stream`.
