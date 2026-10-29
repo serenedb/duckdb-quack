@@ -81,8 +81,9 @@ unique_ptr<GlobalSinkState> QuackInsert::GetGlobalSinkState(ClientContext &conte
 
 	// inline_rows = 0, because the statement waits for our batches and has no row to answer with. The
 	// scan registers the stream while it binds, so PREPARE must land before the first batch.
-	auto client_wrapper = quack_catalog.GetClientConnection()->GetClient(context);
-	auto prepare = make_uniq<PrepareRequestMessage>(quack_catalog.GetConnectionId(), sql, query_uuid);
+	auto session = quack_catalog.GetClientConnection();
+	auto client_wrapper = session->GetClient(context);
+	auto prepare = session->MakePrepare(sql, query_uuid);
 	prepare->SetInlineRows(optional_idx(0));
 	client_wrapper->GetClient().Request<PrepareResponseMessage>(context, std::move(prepare));
 

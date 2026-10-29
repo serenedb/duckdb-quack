@@ -120,6 +120,13 @@ public:
 
 	void CancelQuery(hugeint_t query_uuid);
 
+	//! The PREPARE of `sql` on this connection
+	unique_ptr<PrepareRequestMessage> MakePrepare(string sql, hugeint_t query_uuid) const;
+	//! The PREPAREs made on this connection. Each one stops the statement the server ran before it.
+	idx_t StatementsStarted() const {
+		return statements_started;
+	}
+
 	const string &ConnectionId() const {
 		return connection_id;
 	}
@@ -158,6 +165,7 @@ private:
 	idx_t heartbeat_timeout_seconds;
 	mutable mutex lock;
 	mutable atomic<bool> server_invalidated {false};
+	mutable atomic<idx_t> statements_started {0};
 	//! Bounds cached_clients: each cached client holds a persistent socket that pins a server
 	//! connection slot, so an unbounded cache would let one attach starve the server's budget.
 	idx_t max_connections_cached;
