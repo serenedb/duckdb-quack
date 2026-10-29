@@ -106,6 +106,15 @@ QuackStorageExtensionInfo &QuackStorageExtensionInfo::GetState(const DatabaseIns
 	return static_cast<QuackStorageExtensionInfo &>(*extension->storage_info);
 }
 
+void QuackStorageExtensionInfo::RunInBackground(const DatabaseInstance &instance, std::function<void()> task) {
+	auto &state = GetState(instance);
+	if (!state.scheduler) {
+		task();
+		return;
+	}
+	state.scheduler(milliseconds(0), std::move(task));
+}
+
 void QuackStorageExtensionInfo::AddServer(QuackServer &server) {
 	lock_guard<mutex> guard(servers_lock);
 	servers.push_back(server);

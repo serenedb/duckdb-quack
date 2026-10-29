@@ -23,6 +23,7 @@
 #include "storage/quack_insert.hpp"
 #include "quack_message.hpp"
 #include "quack_client.hpp"
+#include "quack_storage.hpp"
 #include "storage/quack_transaction.hpp"
 #include "quack_session_state.hpp"
 
@@ -76,8 +77,9 @@ QuackCatalog::QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri_p,
 	auto load_info = LoadCatalog(context);
 	snapshot = make_shared_ptr<QuackSchemaSet>(context, *this, load_info);
 	auto random = make_shared_ptr<RandomEngine>();
-	heartbeat.Start([this, random] { return QuackHeartbeatInterval(LeaseSeconds(), *random); },
-	                [this] { SendHeartbeats(); });
+	heartbeat.Start(
+	    QuackStorageExtensionInfo::GetState(*context.db).scheduler,
+	    [this, random] { return QuackHeartbeatInterval(LeaseSeconds(), *random); }, [this] { SendHeartbeats(); });
 }
 
 idx_t QuackCatalog::LeaseSeconds() {
@@ -126,12 +128,15 @@ void QuackCatalog::SendHeartbeats() {
 			}
 		}
 	}
+	// each on its own, so a slow answer for one session delays the lease of no other
 	for (auto &session : live) {
-		try {
-			session->SendHeartbeat();
-		} catch (...) {
-			// a failed heartbeat is retried on the next round; the session's next request reports a lost lease
-		}
+		QuackStorageExtensionInfo::RunInBackground(GetDatabase(), [session] {
+			try {
+				session->SendHeartbeat();
+			} catch (...) {
+				// a failed heartbeat is retried on the next round; the session's next request reports a lost lease
+			}
+		});
 	}
 }
 
