@@ -14,7 +14,7 @@
 
 namespace duckdb {
 
-static milliseconds HeartbeatInterval(idx_t heartbeat_timeout_seconds, RandomEngine &random) {
+milliseconds QuackHeartbeatInterval(idx_t heartbeat_timeout_seconds, RandomEngine &random) {
 	auto interval_ms = heartbeat_timeout_seconds * 1000 / 3;
 	return milliseconds(static_cast<int64_t>(interval_ms * random.NextRandom(0.8, 1.2)));
 }
@@ -234,29 +234,47 @@ unique_ptr<PrepareRequestMessage> QuackClientConnection::MakePrepare(string sql,
 }
 
 QuackClientConnection::~QuackClientConnection() {
+	Close();
+}
+
+void QuackClientConnection::Close() {
+	if (closed.exchange(true)) {
+		return;
+	}
 	heartbeat.Stop();
-	if (!cached_clients.empty()) {
-		try {
-			auto &client = cached_clients.back();
-			// A dead peer at teardown must not block the destructor for the full request timeout (which
-			// task dispatch may have set to an hour). Bound the transport first.
-			client->PrepareTeardownRequest();
-			client->Request<SuccessResponse>(nullptr, make_uniq<DisconnectMessage>(connection_id));
-		} catch (...) {
+	unique_ptr<QuackClient> client;
+	{
+		lock_guard<mutex> guard(lock);
+		if (cached_clients.empty()) {
+			return;
 		}
+		client = std::move(cached_clients.back());
+		cached_clients.pop_back();
+	}
+	try {
+		// A dead peer must not block the caller for the full request timeout (which task dispatch may have
+		// set to an hour). Bound the transport first.
+		client->PrepareTeardownRequest();
+		client->Request<SuccessResponse>(nullptr, make_uniq<DisconnectMessage>(connection_id));
+	} catch (...) { // NOLINT: best effort, the server ends the session once its lease runs out
 	}
 }
 
 void QuackClientConnection::StartHeartbeat() {
 	auto random = make_shared_ptr<RandomEngine>();
-	heartbeat.Start([this, random] { return HeartbeatInterval(heartbeat_timeout_seconds, *random); },
+	heartbeat.Start([this, random] { return QuackHeartbeatInterval(heartbeat_timeout_seconds, *random); },
 	                [this] { SendHeartbeat(); });
 }
 
 //! A failed attempt is not terminal: the worker swallows the throw and retries next interval.
-void QuackClientConnection::SendHeartbeat() {
+void QuackClientConnection::SendHeartbeat() const {
+	if (closed) {
+		return;
+	}
 	auto client = TakeClient(nullptr);
+	client->SetOwnerConnection(this);
 	client->Request<SuccessResponse>(nullptr, make_uniq<HeartbeatRequestMessage>(connection_id));
+	client->SetOwnerConnection(nullptr);
 	StoreClient(std::move(client));
 }
 
@@ -309,15 +327,7 @@ idx_t QuackClient::ResolveHeartbeatTimeout(ClientContext &context, optional_ptr<
 	return timeout_seconds;
 }
 
-shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &context, const QuackUri &uri,
-                                                               string token, string client_id,
-                                                               idx_t heartbeat_timeout_seconds) {
-	// Single choke point for every connection path (ATTACH + quack_query), so a malformed client_id is
-	// rejected here regardless of where it came from.
-	ValidateClientId(client_id);
-	ValidateHeartbeatTimeout(heartbeat_timeout_seconds);
-	auto server_uri = uri;
-	// a token the caller did not supply comes from the secret manager
+string QuackClient::ResolveToken(ClientContext &context, const QuackUri &uri, string token) {
 	if (token.empty()) {
 		// canonical form, so the scope match does not depend on how the endpoint was spelled
 		auto secret = QuackSecret::Find(context, nullptr, uri.CanonicalUri());
@@ -328,6 +338,18 @@ shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &co
 	if (token.empty()) {
 		throw InvalidInputException("Could not find a Quack authentication token");
 	}
+	return token;
+}
+
+shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &context, const QuackUri &uri,
+                                                               string token, string client_id,
+                                                               idx_t heartbeat_timeout_seconds) {
+	// Single choke point for every connection path (ATTACH + quack_query), so a malformed client_id is
+	// rejected here regardless of where it came from.
+	ValidateClientId(client_id);
+	ValidateHeartbeatTimeout(heartbeat_timeout_seconds);
+	auto server_uri = uri;
+	token = ResolveToken(context, uri, std::move(token));
 
 	// open a HTTP client to the server
 	auto client = QuackClient::GetClient(context, server_uri);
@@ -347,11 +369,8 @@ shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &co
 	// Cache at most one client per async send slot: pending SEND_DATA tasks can check out far more
 	// clients than ever POST concurrently, and each cached client pins a server connection slot.
 	idx_t pool_size = MaxValue<idx_t>(1, (idx_t)TaskScheduler::GetScheduler(context).NumberOfAsyncThreads());
-	auto connection =
-	    make_shared_ptr<QuackClientConnection>(*context.db, std::move(client), server_uri, std::move(connection_id),
-	                                           accepted_heartbeat_timeout_seconds, pool_size);
-	connection->StartHeartbeat();
-	return connection;
+	return make_shared_ptr<QuackClientConnection>(*context.db, std::move(client), server_uri, std::move(connection_id),
+	                                              accepted_heartbeat_timeout_seconds, pool_size);
 }
 
 unique_ptr<QuackClient> QuackClientConnection::TakeClient(optional_ptr<ClientContext> context) const {
@@ -371,6 +390,10 @@ unique_ptr<QuackClient> QuackClientConnection::TakeClient(optional_ptr<ClientCon
 }
 
 unique_ptr<QuackClientWrapper> QuackClientConnection::GetClient(ClientContext &context) const {
+	if (closed) {
+		throw InvalidInputException("The session with the Quack server at %s is closed: its database was detached",
+		                            uri.Uri());
+	}
 	if (server_invalidated) {
 		throw InvalidInputException(
 		    "The Quack server at %s invalidated its database, so this attached database is gone with it. The "
@@ -391,8 +414,14 @@ unique_ptr<QuackClientWrapper> QuackClientConnection::GetClient(ClientContext &c
 }
 
 void QuackClient::NoteError(const ErrorResponse &error_response) {
-	if (error_response.MustInvalidate() && owner_connection) {
+	if (!owner_connection) {
+		return;
+	}
+	if (error_response.MustInvalidate()) {
 		owner_connection->MarkServerInvalidated();
+	}
+	if (error_response.Error().RawMessage() == QUACK_INVALID_CONNECTION_ID) {
+		owner_connection->MarkLost();
 	}
 }
 

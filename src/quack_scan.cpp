@@ -95,7 +95,12 @@ static unique_ptr<FunctionData> QuackScanBind(ClientContext &context, TableFunct
 	auto heartbeat_timeout = QuackClient::ResolveHeartbeatTimeout(
 	    context, heartbeat_timeout_entry != input.named_parameters.end() ? &heartbeat_timeout_entry->second : nullptr);
 	bind_data->client_connection =
-	    QuackClient::ConnectToServer(context, server_uri, token, std::move(client_id), heartbeat_timeout);
+	    QuackClient::ConnectToServer(context, server_uri, token, client_id, heartbeat_timeout);
+	bind_data->client_connection->StartHeartbeat();
+	bind_data->server_uri = server_uri;
+	bind_data->token = std::move(token);
+	bind_data->client_id = std::move(client_id);
+	bind_data->heartbeat_timeout = heartbeat_timeout;
 	bind_data->query = std::move(query);
 	BindRemoteQuery(context, *bind_data, return_types, names);
 	return bind_data;
@@ -126,7 +131,7 @@ static unique_ptr<FunctionData> QuackScanBindCatalogName(ClientContext &context,
 
 	auto &catalog = QuackCatalog::GetQuackCatalog(context, input.inputs[0]);
 	auto bind_data = make_uniq<QuackScanBindData>();
-	bind_data->client_connection = catalog.GetClientConnection();
+	bind_data->client_connection = catalog.GetClientConnection(context);
 	bind_data->query = input.inputs[1].GetValue<string>();
 	bind_data->catalog_name = input.inputs[0];
 	bind_data->use_transaction = use_transaction;
@@ -208,6 +213,8 @@ struct QuackScanGlobalState : GlobalTableFunctionState {
 		return std::move(results);
 	}
 
+	shared_ptr<QuackClientConnection> connection;
+
 private:
 	mutex lock;
 	vector<ChunkResult> results;
@@ -251,9 +258,29 @@ static bool ReconnectsEnabled(ClientContext &context) {
 	return val.GetValue<bool>();
 }
 
+//! The session a run of the scan uses. A prepared scan runs long after its bind, when the server may have lost the
+//! bind's session: the attached database has a new one then, and a scan with its own connection opens it again.
+static shared_ptr<QuackClientConnection> ScanConnection(ClientContext &context, QuackScanBindData &bind_data) {
+	if (!bind_data.catalog_name.IsNull()) {
+		auto catalog_name = bind_data.catalog_name;
+		auto &catalog = QuackCatalog::GetQuackCatalog(context, catalog_name);
+		// a run that binds nothing joins the statement's transaction here, which forgets a session the server lost
+		QuackTransaction::Get(context, catalog);
+		return catalog.GetClientConnection(context);
+	}
+	lock_guard<mutex> guard(bind_data.connection_lock);
+	if (bind_data.client_connection->Lost()) {
+		auto connection = QuackClient::ConnectToServer(context, bind_data.server_uri, bind_data.token,
+		                                               bind_data.client_id, bind_data.heartbeat_timeout);
+		connection->StartHeartbeat();
+		bind_data.client_connection = std::move(connection);
+	}
+	return bind_data.client_connection;
+}
+
 unique_ptr<GlobalTableFunctionState> QuackScanInitGlobal(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind_data = input.bind_data->Cast<QuackScanBindData>();
-	auto &connection = bind_data.client_connection;
+	auto connection = ScanConnection(context, input.bind_data->CastNoConst<QuackScanBindData>());
 
 	// For the catalog path (ATTACH), LookupEntry only prepares without executing
 	// to avoid the server-side result being overwritten by subsequent lookups.
@@ -274,11 +301,12 @@ unique_ptr<GlobalTableFunctionState> QuackScanInitGlobal(ClientContext &context,
 	} else {
 		auto &mutable_bind_data = input.bind_data->CastNoConst<QuackScanBindData>();
 		// The bind ran the statement for the first execution, so only a read runs again in it: a result the
-		// bind left on the server is gone once the connection ran another statement
+		// bind left on the server is gone once the connection ran another statement, or once it is a new session
 		auto first_execution = !mutable_bind_data.bind_result_taken.exchange(true);
 		auto bind_result_dropped =
 		    bind_data.needs_more_fetch && bind_data.client_connection->StatementsStarted() != bind_data.bind_statement;
-		if (first_execution && !(bind_data.use_transaction && bind_result_dropped)) {
+		auto same_session = connection == bind_data.client_connection;
+		if (first_execution && same_session && !(bind_data.use_transaction && bind_result_dropped)) {
 			for (auto &chunk_ref : bind_data.results) {
 				auto &chunk = chunk_ref->Chunk();
 				results.emplace_back(chunk, fetch_pushdown_type);
@@ -287,6 +315,7 @@ unique_ptr<GlobalTableFunctionState> QuackScanInitGlobal(ClientContext &context,
 			auto global_state = make_uniq<QuackScanGlobalState>(
 			    input.column_indexes, input.projection_ids, std::move(results), bind_data.needs_more_fetch, query_uuid,
 			    ReconnectsEnabled(context), fetch_pushdown_type);
+			global_state->connection = connection;
 			if (bind_data.needs_more_fetch) {
 				global_state->fetcher = make_shared_ptr<QuackFetcher>(context, *connection, query_uuid,
 				                                                      QuackFetcher::GetReadAheadDepth(context));
@@ -320,6 +349,7 @@ unique_ptr<GlobalTableFunctionState> QuackScanInitGlobal(ClientContext &context,
 	auto global_state =
 	    make_uniq<QuackScanGlobalState>(input.column_indexes, input.projection_ids, std::move(results),
 	                                    needs_more_fetch, query_uuid, ReconnectsEnabled(context), fetch_pushdown_type);
+	global_state->connection = connection;
 	if (needs_more_fetch) {
 		// start pipelining FETCH requests on the ASYNC pool before the first scan call
 		global_state->fetcher =
@@ -342,16 +372,15 @@ unique_ptr<LocalTableFunctionState> QuackScanInitLocal(ExecutionContext &context
 	return local_state;
 }
 
-static void SendAcknowledgement(ClientContext &context, QuackScanGlobalState &global_state,
-                                QuackScanBindData &bind_data) {
+static void SendAcknowledgement(ClientContext &context, QuackScanGlobalState &global_state) {
 	if (global_state.ack_sent.exchange(true)) {
 		return;
 	}
 	try {
-		auto client_wrapper = bind_data.client_connection->GetClient(context);
+		auto client_wrapper = global_state.connection->GetClient(context);
 		client_wrapper->GetClient().Request<SuccessResponse>(
 		    context,
-		    make_uniq<AcknowledgementMessage>(bind_data.client_connection->ConnectionId(), global_state.query_uuid));
+		    make_uniq<AcknowledgementMessage>(global_state.connection->ConnectionId(), global_state.query_uuid));
 	} catch (const std::exception &e) {
 		// The query is already complete, so we swallow the failure rather than fail the query
 		DUCKDB_LOG_WARNING(
@@ -376,7 +405,7 @@ static void FinishScan(ClientContext &context, QuackScanGlobalState &global_stat
 	if (global_state.fetcher) {
 		global_state.fetcher->StopAndDrain();
 	}
-	SendAcknowledgement(context, global_state, bind_data);
+	SendAcknowledgement(context, global_state);
 }
 
 static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChunk &output) {

@@ -75,13 +75,15 @@ unique_ptr<GlobalSinkState> QuackInsert::GetGlobalSinkState(ClientContext &conte
 	    "INSERT INTO %s SELECT * FROM scan_data_from_quack_client(%s, NULL::%s, ordered := %s)", remote_name.ToString(),
 	    SQLString(stream_id), StructPrototype(types), order_mode != AppendOrderMode::UNORDERED ? "true" : "false");
 
+	// joining the statement's transaction forgets a session the server lost
+	auto &transaction = QuackTransaction::Get(context, quack_catalog);
 	if (!context.transaction.IsAutoCommit()) {
-		QuackTransaction::Get(context, quack_catalog).ForceStart();
+		transaction.ForceStart();
 	}
 
 	// inline_rows = 0, because the statement waits for our batches and has no row to answer with. The
 	// scan registers the stream while it binds, so PREPARE must land before the first batch.
-	auto session = quack_catalog.GetClientConnection();
+	auto session = quack_catalog.GetClientConnection(context);
 	auto client_wrapper = session->GetClient(context);
 	auto prepare = session->MakePrepare(sql, query_uuid);
 	prepare->SetInlineRows(optional_idx(0));
