@@ -2,6 +2,7 @@
 #include "duckdb.hpp"
 #include "quack_client.hpp"
 #include "quack_message.hpp"
+#include "quack_storage.hpp"
 #include "storage/quack_catalog.hpp"
 
 namespace duckdb {
@@ -34,7 +35,8 @@ static unique_ptr<FunctionData> QuackCancelBind(ClientContext &context, TableFun
 		throw BinderException("quack_cancel arguments cannot be NULL");
 	}
 	// fail at bind on a database that is not a quack one
-	QuackCatalog::GetQuackCatalog(context, input.inputs[0]);
+	auto &catalog = QuackCatalog::GetQuackCatalog(context, input.inputs[0]);
+	QuackStorageExtensionInfo::CheckAccess(context, QuackAccess::ATTACHED, catalog.GetName());
 
 	return_types = {LogicalType::VARCHAR, LogicalType::BOOLEAN};
 	names = {"connection_id", "cancelled"};

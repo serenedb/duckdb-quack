@@ -38,6 +38,11 @@ static void ValidateHeartbeatTimeoutSetting(ClientContext &, SetScope, Value &pa
 	QuackClient::ValidateHeartbeatTimeout(parameter.GetValue<idx_t>());
 }
 
+//! A setting of the whole server: only who may manage the server changes it, RESET included
+static void RequireServerAccess(ClientContext &context, SetScope, Value &) {
+	QuackStorageExtensionInfo::CheckAccess(context, QuackAccess::SERVER);
+}
+
 static unique_ptr<BaseSecret> CreateQuackSecretFromConfig(ClientContext &, CreateSecretInput &input) {
 	auto scope = input.scope;
 	if (scope.empty()) {
@@ -76,6 +81,7 @@ static void RegisterQuackSecretType(ExtensionLoader &loader) {
 static void QuackConnectionIdFunc(const DataChunk &args, ExpressionState &state, Vector &result) {
 	auto catalog_name = args.GetValue(0, 0);
 	auto &quack_catalog = QuackCatalog::GetQuackCatalog(state.GetContext(), catalog_name);
+	QuackStorageExtensionInfo::CheckAccess(state.GetContext(), QuackAccess::ATTACHED, quack_catalog.GetName());
 	result.SetValue(0, Value(quack_catalog.GetClientConnection(state.GetContext())->ConnectionId()));
 }
 
@@ -85,6 +91,7 @@ static void QuackIdentifyFun(ClientContext &, TableFunctionInput &, DataChunk &)
 
 static unique_ptr<FunctionData> QuackIdentifyBind(ClientContext &ctx, TableFunctionBindInput &input,
                                                   vector<LogicalType> &return_types, vector<Identifier> &names) {
+	QuackStorageExtensionInfo::CheckAccess(ctx, QuackAccess::SERVER);
 	auto &db_config = DBConfig::GetConfig(ctx);
 	for (auto &kv : input.named_parameters) {
 		if (kv.second.IsNull()) {
@@ -117,8 +124,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("quack_prepare_inline_rows",
 	                          "Rows returned inline in the PREPARE response before the remainder is left to "
 	                          "FETCH; drains whole batches, so it may overshoot to a batch boundary",
-	                          LogicalType::UBIGINT, Value::UBIGINT(QUACK_PREPARE_INLINE_ROWS_DEFAULT), nullptr,
-	                          SetScope::GLOBAL);
+	                          LogicalType::UBIGINT, Value::UBIGINT(QUACK_PREPARE_INLINE_ROWS_DEFAULT),
+	                          RequireServerAccess, SetScope::GLOBAL);
 
 	config.AddExtensionOption("quack_fetch_read_ahead",
 	                          "FETCH requests kept in flight ahead of the scan (0 = number of async threads)",
@@ -162,8 +169,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("quack_server_stream_buffer_bytes",
 	                          "Server-side per-stream byte budget, at most a quarter of memory_limit: FETCH counts "
 	                          "serialized payload bytes, INSERT counts decoded chunk allocations; 0 disables the limit",
-	                          LogicalType::UBIGINT, Value::UBIGINT(QUACK_SERVER_STREAM_BUFFER_BYTES_DEFAULT), nullptr,
-	                          SetScope::GLOBAL);
+	                          LogicalType::UBIGINT, Value::UBIGINT(QUACK_SERVER_STREAM_BUFFER_BYTES_DEFAULT),
+	                          RequireServerAccess, SetScope::GLOBAL);
 
 	// Default client_id handed to any ATTACH / quack_query that doesn't pass one explicitly
 	string default_client_id;
@@ -175,7 +182,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("quack_default_client_id",
 	                          "client_id used when ATTACH / quack_query omit one; precomputed at load from "
 	                          "$QUACK_CLIENT_ID (empty opts out) or a random per-instance id. Set to '' to opt out.",
-	                          LogicalType::VARCHAR, Value(default_client_id), nullptr, SetScope::GLOBAL);
+	                          LogicalType::VARCHAR, Value(default_client_id), RequireServerAccess, SetScope::GLOBAL);
 	config.AddExtensionOption("quack_default_heartbeat_timeout",
 	                          "Heartbeat lease timeout in seconds requested by clients when ATTACH / quack_query "
 	                          "omit heartbeat_timeout",
@@ -189,15 +196,15 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("quack_enable_reconnects",
 	                          "Enable reconnect support (clients acknowledge results, the server caches the last "
 	                          "result until acknowledged)",
-	                          LogicalType::BOOLEAN, Value::BOOLEAN(false), nullptr, SetScope::GLOBAL);
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(false), RequireServerAccess, SetScope::GLOBAL);
 
 	config.AddExtensionOption("quack_cache_max_rows",
 	                          "Maximum rows the server retains in the result cache (0 = unlimited)",
-	                          LogicalType::UBIGINT, Value::UBIGINT(100000), nullptr, SetScope::GLOBAL);
+	                          LogicalType::UBIGINT, Value::UBIGINT(100000), RequireServerAccess, SetScope::GLOBAL);
 
 	config.AddExtensionOption("quack_result_ttl",
 	                          "Seconds an idle cached result is kept before it is dropped (0 = never)",
-	                          LogicalType::UBIGINT, Value::UBIGINT(3600), nullptr, SetScope::GLOBAL);
+	                          LogicalType::UBIGINT, Value::UBIGINT(3600), RequireServerAccess, SetScope::GLOBAL);
 
 	// Process-wide fallback anchor for whoami().uptime when whoami_started_at isn't set.
 	// Stored as BIGINT epoch-microseconds to stay TZ-invariant regardless of ICU state.

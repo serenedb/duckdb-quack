@@ -9,6 +9,7 @@
 #include "quack_scan.hpp"
 #include "quack_client.hpp"
 #include "quack_fetch_ahead.hpp"
+#include "quack_storage.hpp"
 #include "storage/quack_catalog.hpp"
 #include "storage/quack_transaction.hpp"
 
@@ -77,6 +78,7 @@ static unique_ptr<FunctionData> QuackScanBind(ClientContext &context, TableFunct
 	if (input.inputs[0].IsNull() || input.inputs[1].IsNull()) {
 		throw BinderException("quack_query URI and query parameters cannot be NULL");
 	}
+	QuackStorageExtensionInfo::CheckAccess(context, QuackAccess::CONNECT);
 
 	auto query = input.inputs[1].GetValue<string>();
 	auto initial_uri = QuackUri(input.inputs[0].GetValue<string>());
@@ -138,6 +140,7 @@ static unique_ptr<FunctionData> QuackScanBindCatalogName(ClientContext &context,
 	}
 
 	auto &catalog = QuackCatalog::GetQuackCatalog(context, input.inputs[0]);
+	QuackStorageExtensionInfo::CheckAccess(context, QuackAccess::ATTACHED, catalog.GetName());
 	auto bind_data = make_uniq<QuackScanBindData>();
 	bind_data->client_connection = catalog.GetClientConnection(context);
 	bind_data->query = input.inputs[1].GetValue<string>();

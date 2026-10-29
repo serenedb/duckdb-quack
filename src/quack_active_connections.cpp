@@ -28,9 +28,10 @@ struct QuackActiveConnectionsState : GlobalTableFunctionState {
 	idx_t offset = 0;
 };
 
-static unique_ptr<FunctionData> QuackActiveConnectionsBind(ClientContext &, TableFunctionBindInput &,
+static unique_ptr<FunctionData> QuackActiveConnectionsBind(ClientContext &context, TableFunctionBindInput &,
                                                            vector<LogicalType> &return_types,
                                                            vector<Identifier> &names) {
+	QuackStorageExtensionInfo::CheckAccess(context, QuackAccess::SERVER);
 	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,  LogicalType::VARCHAR,
 	                LogicalType::VARCHAR, LogicalType::BIGINT,  LogicalType::TIMESTAMP};
 	names = {"server_id", "connection_id", "query", "state", "client_id_hash", "cached_rows", "query_started_at"};
