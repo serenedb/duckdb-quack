@@ -1,0 +1,66 @@
+//===----------------------------------------------------------------------===//
+//                         DuckDB
+//
+// quack_statement.hpp
+//
+//
+//===----------------------------------------------------------------------===//
+
+#pragma once
+
+#include "duckdb/common/error_data.hpp"
+#include "duckdb/main/client_context.hpp"
+#include "duckdb/main/query_result.hpp"
+#include "duckdb/main/statement_iterator.hpp"
+#include "duckdb/parser/sql_statement.hpp"
+
+#include "quack_fetch_collector.hpp"
+
+#include <functional>
+
+namespace duckdb {
+
+enum class QuackRunState : uint8_t {
+	//! More work is ready: run the next slice
+	NOT_READY,
+	//! The statement waits for its tasks or for client data: run the next slice once on_reschedule fires
+	BLOCKED,
+	//! The stream is finished or failed
+	FINISHED
+};
+
+//! Runs the SQL of one PREPARE on a server-side context and fills the PREPARE's result stream. The host
+//! drives it slice by slice, so no thread waits on the statement.
+class QuackStatementRunner {
+public:
+	QuackStatementRunner(ClientContext &context, shared_ptr<QuackResultStream> stream, string sql);
+	~QuackStatementRunner();
+
+	//! Run one slice. `on_reschedule` fires, from any thread, once a BLOCKED statement can go on.
+	QuackRunState Step(const std::function<void()> &on_reschedule);
+
+	const shared_ptr<QuackResultStream> &Stream() const {
+		return stream;
+	}
+
+private:
+	//! Parse the SQL once. It holds one command, as a prepared statement does in PostgreSQL.
+	void Parse();
+	//! Submit the next statement, or close the stream after the last one
+	QuackRunState SubmitNext();
+	//! The statements returned no rows: the last one's Success/Count result becomes batch 1
+	void SendLastResult();
+	void Fail(ErrorData error);
+
+	ClientContext &context;
+	shared_ptr<QuackResultStream> stream;
+	string sql;
+	bool parsed = false;
+	vector<unique_ptr<SQLStatement>> statements;
+	idx_t next_statement = 0;
+	unique_ptr<QueryResult> running;
+	unique_ptr<QueryResult> last_result;
+	bool finished = false;
+};
+
+} // namespace duckdb

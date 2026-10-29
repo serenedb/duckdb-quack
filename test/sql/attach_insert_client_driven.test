@@ -182,5 +182,4 @@ select * from scan_data_from_quack_client('made-up', NULL::STRUCT(i BIGINT));
 ----
 internal function
 
-statement ok quack_db:quack_server_con
-call quack_stop('quack:localhost')
+include test/template/quack_teardown.test_template
