@@ -70,7 +70,7 @@ unique_ptr<GlobalSinkState> QuackInsert::GetGlobalSinkState(ClientContext &conte
 	auto stream_id = UUID::ToString(UUID::GenerateRandomUUID());
 	auto query_uuid = UUID::GenerateRandomUUID();
 	// The remote name carries the full nested-schema path, so the server resolves the same table.
-	auto remote_name = table_entry->schema.Cast<QuackSchemaCatalogEntry>().GetRemoteName(table_entry->name);
+	auto remote_name = QualifiedName(table_entry->ParentSchemaPath(), table_entry->name);
 	auto sql = StringUtil::Format(
 	    "INSERT INTO %s SELECT * FROM scan_data_from_quack_client(%s, NULL::%s, ordered := %s)", remote_name.ToString(),
 	    SQLString(stream_id), StructPrototype(types), order_mode != AppendOrderMode::UNORDERED ? "true" : "false");

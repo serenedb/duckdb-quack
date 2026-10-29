@@ -17,21 +17,7 @@ class QuackStorageExtensionInfo : public StorageExtensionInfo {
 public:
 	static QuackStorageExtensionInfo &GetState(const DatabaseInstance &instance);
 
-	QuackServer &CreateServer(ClientContext &context, const QuackUri &listen_uri, const string &token,
-	                          const string &ssl_cert_file = string(), const string &ssl_key_file = string());
-	bool StopServer(ClientContext &context, const QuackUri &listen_uri);
-
-	struct ServerSnapshot {
-		string listen_uri;
-		string listen_url;
-		string host;
-		uint16_t port;
-		idx_t active_connections;
-		vector<std::pair<string, string>> info;
-	};
-
 	vector<QuackConnectionSnapshot> GetActiveConnectionSnaps();
-	vector<ServerSnapshot> ListServers();
 
 	static constexpr const char *STORAGE_EXTENSION_KEY = "quack";
 

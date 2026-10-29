@@ -40,7 +40,7 @@ enum class MessageType : uint8_t {
 template <>
 const char *EnumUtil::ToChars<MessageType>(MessageType value);
 template <>
-MessageType EnumUtil::FromString<MessageType>(const char *value);
+MessageType EnumUtil::FromString<MessageType>(std::string_view value);
 
 // workaround for wrong serialization functions signature on DataChunk :/
 // TODO: remove in 2.0
@@ -260,10 +260,10 @@ public:
 	const string &ClientPlatform() const {
 		return client_platform;
 	}
-	const idx_t MinimumSupportedQuackVersion() const {
+	idx_t MinimumSupportedQuackVersion() const {
 		return min_supported_quack_version;
 	}
-	const idx_t MaximumSupportedQuackVersion() const {
+	idx_t MaximumSupportedQuackVersion() const {
 		return max_supported_quack_version;
 	}
 	idx_t HeartbeatTimeoutSeconds() const {

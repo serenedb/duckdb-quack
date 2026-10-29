@@ -12,8 +12,6 @@
 #include "storage/quack_schema.hpp"
 #include "quack_uri.hpp"
 
-#include <condition_variable>
-
 namespace duckdb {
 
 class QuackCatalog;
@@ -102,7 +100,6 @@ private:
 private:
 	shared_ptr<QuackClientConnection> client_connection;
 	mutex snapshot_lock;
-	std::condition_variable snapshot_loaded;
 	shared_ptr<QuackSchemaSet> snapshot;
 	idx_t invalidated_version = 0;
 	idx_t loaded_version = 0;

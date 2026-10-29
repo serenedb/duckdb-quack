@@ -99,7 +99,7 @@ static void AbortStatement(QuackConnection &connection, const string &reason) {
 //! Update the cache with what its stream holds. Drops the cache when the result grows past
 //! quack_cache_max_rows, because it is then too large to keep for a reconnect.
 static void SyncResultCache(QuackConnection &connection, QuackResultStream &stream, DatabaseInstance &db) {
-	std::unique_lock<std::mutex> lock(connection.lock);
+	lock_guard<mutex> lock(connection.lock);
 	auto &cache = connection.result_cache;
 	if (!cache || cache->stream.get() != &stream) {
 		return;
@@ -229,7 +229,7 @@ void QuackServer::CleanupExpiredConnection(QuackConnection &connection) {
 bool QuackServer::RenewConnectionLease(const string &connection_id, const shared_ptr<QuackConnection> &connection) {
 	shared_ptr<QuackConnection> expired_connection;
 	{
-		std::lock_guard<std::mutex> guard(active_connections_mutex);
+		lock_guard<mutex> guard(active_connections_mutex);
 		auto entry = active_connections.find(connection_id);
 		if (entry == active_connections.end() || entry->second.get() != connection.get()) {
 			return false;
@@ -266,7 +266,7 @@ vector<QuackConnectionSnapshot> QuackServer::GetActiveConnectionSnap() {
 	// fields under its own lock (never holding both mutex classes at once).
 	vector<shared_ptr<QuackConnection>> connections;
 	{
-		std::lock_guard<std::mutex> lock(active_connections_mutex);
+		lock_guard<mutex> lock(active_connections_mutex);
 		connections.reserve(active_connections.size());
 		for (auto &[id, conn] : active_connections) {
 			connections.push_back(conn);
@@ -281,7 +281,7 @@ vector<QuackConnectionSnapshot> QuackServer::GetActiveConnectionSnap() {
 		snapshot.connection_id = conn->connection_id;
 		snapshot.client_id_hash = conn->client_id_hash;
 		{
-			std::lock_guard<std::mutex> lock(conn->lock);
+			lock_guard<mutex> lock(conn->lock);
 			snapshot.sql_query = conn->sql_query;
 			snapshot.query_state = conn->query_state;
 			snapshot.query_started_at = conn->query_started_at;
@@ -301,7 +301,7 @@ void QuackServer::RegisterCacheForExpiry(QuackConnection &connection) {
 		return;
 	}
 	connection.cache_in_expiry_queue = true;
-	std::lock_guard<std::mutex> lock(cache_expiry_mutex);
+	lock_guard<mutex> lock(cache_expiry_mutex);
 	cache_expiry_queue.push({connection.result_cache->last_served_at, connection.connection_id});
 }
 
@@ -317,7 +317,7 @@ void QuackServer::SweepExpiredCaches(DatabaseInstance &db) {
 	auto now = Timestamp::GetCurrentTimestamp();
 	vector<CacheExpiryEntry> candidates;
 	{
-		std::lock_guard<std::mutex> lock(cache_expiry_mutex);
+		lock_guard<mutex> lock(cache_expiry_mutex);
 		while (!cache_expiry_queue.empty() && now.value - cache_expiry_queue.top().served_at.value > ttl_micros) {
 			candidates.push_back(cache_expiry_queue.top());
 			cache_expiry_queue.pop();
@@ -334,7 +334,7 @@ void QuackServer::SweepExpiredCaches(DatabaseInstance &db) {
 			continue;
 		}
 		{
-			std::unique_lock<std::mutex> lock(connection->lock, std::try_to_lock);
+			unique_lock<mutex> lock(connection->lock, std::try_to_lock);
 			if (!lock.owns_lock()) {
 				// another handler is mutating the session state; retry on the next sweep
 				requeue.push_back(std::move(entry));
@@ -362,7 +362,7 @@ void QuackServer::SweepExpiredCaches(DatabaseInstance &db) {
 		AbortStatement(*connection, "Query was interrupted");
 	}
 	if (!requeue.empty()) {
-		std::lock_guard<std::mutex> lock(cache_expiry_mutex);
+		lock_guard<mutex> lock(cache_expiry_mutex);
 		for (auto &entry : requeue) {
 			cache_expiry_queue.push(std::move(entry));
 		}
@@ -371,7 +371,7 @@ void QuackServer::SweepExpiredCaches(DatabaseInstance &db) {
 }
 
 shared_ptr<QuackConnection> QuackServer::GetConnection(const string &connection_id) {
-	std::lock_guard<std::mutex> lock(active_connections_mutex);
+	lock_guard<mutex> lock(active_connections_mutex);
 	auto it = active_connections.find(connection_id);
 	if (it != active_connections.end()) {
 		return it->second;
@@ -381,7 +381,7 @@ shared_ptr<QuackConnection> QuackServer::GetConnection(const string &connection_
 
 string QuackServer::CreateNewConnection(const string &connection_id, const string &client_id_hash,
                                         idx_t heartbeat_timeout_seconds) {
-	std::lock_guard<std::mutex> lock(active_connections_mutex);
+	lock_guard<mutex> lock(active_connections_mutex);
 
 	D_ASSERT(active_connections.find(connection_id) == active_connections.end());
 
@@ -404,7 +404,7 @@ string QuackServer::CreateNewConnection(const string &connection_id, const strin
 }
 
 bool QuackServer::DisconnectConnection(const string &connection_id) {
-	std::lock_guard<std::mutex> lock(active_connections_mutex);
+	lock_guard<mutex> lock(active_connections_mutex);
 
 	auto entry = active_connections.find(connection_id);
 	if (entry == active_connections.end()) {
@@ -662,7 +662,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		// Stop the previous producer first. This joins its thread, so it frees the execution lock.
 		AbortStatement(connection, "superseded by a new query");
 		{
-			std::unique_lock<std::mutex> lock(connection.lock);
+			lock_guard<mutex> lock(connection.lock);
 			if (prepare_request_message.QueryUUID() != hugeint_t {0, 0}) {
 				// a new client query displaces the retained one, even if caching is now off
 				connection.ClearResultCache();
@@ -703,7 +703,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			// planning failed before a collector existed
 			auto error = stream->buffer.GetError();
 			AbortStatement(connection, "query failed");
-			std::unique_lock<std::mutex> lock(connection.lock);
+			lock_guard<mutex> lock(connection.lock);
 			connection.sql_query = "";
 			connection.query_state = QuackQueryState::CANCELLED;
 			return make_uniq<ErrorResponse>(error);
@@ -749,7 +749,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			if (status == QuackClaimPopStatus::ERRORED) {
 				auto error = stream->buffer.GetError();
 				AbortStatement(connection, "query failed");
-				std::unique_lock<std::mutex> lock(connection.lock);
+				lock_guard<mutex> lock(connection.lock);
 				connection.sql_query = "";
 				connection.query_state = QuackQueryState::CANCELLED;
 				return make_uniq<ErrorResponse>(error);
@@ -761,7 +761,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			// Created for every cached client query, also one with no rows. An empty result then
 			// reports 0, and not "nothing cached".
 			{
-				std::unique_lock<std::mutex> lock(connection.lock);
+				lock_guard<mutex> lock(connection.lock);
 				connection.result_cache =
 				    make_uniq<QuackResultCache>(prepare_request_message.Query(), prepare_request_message.QueryUUID(),
 				                                stream, connection.live_caches);
@@ -941,7 +941,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		connection.duckdb_connection->Interrupt();
 		// The interrupt stops the statement that runs now. Take the state lock, so the change of
 		// state cannot race that statement's handler.
-		std::unique_lock<std::mutex> lock(connection.lock);
+		lock_guard<mutex> lock(connection.lock);
 		connection.query_state = QuackQueryState::CANCELLED;
 		connection.ClearResultCache();
 		return make_uniq<SuccessResponse>();
@@ -949,7 +949,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 	case MessageType::ACKNOWLEDGEMENT: {
 		auto &acknowledgement_message = received_message.Cast<AcknowledgementMessage>();
 		auto &connection = *connection_p;
-		std::unique_lock<std::mutex> lock(connection.lock);
+		lock_guard<mutex> lock(connection.lock);
 		auto &cache = connection.result_cache;
 		if (!cache) {
 			return make_uniq<SuccessResponse>(); // nothing retained, acknowledging is a no-op

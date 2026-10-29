@@ -22,7 +22,7 @@ string MessageTypeToString(MessageType type) {
 }
 
 template <>
-MessageType EnumUtil::FromString<MessageType>(const char *value) {
+MessageType EnumUtil::FromString<MessageType>(std::string_view value) {
 	if (StringUtil::Equals(value, "INVALID")) {
 		return MessageType::INVALID;
 	}

@@ -94,7 +94,7 @@ ORDER BY (database_name = current_database()) DESC, database_name, length(schema
 
 QuackSchemaCatalogEntry::QuackSchemaCatalogEntry(Catalog &catalog_p, CreateSchemaInfo &info_p,
                                                  optional_ptr<SchemaCatalogEntry> parent_schema_p, int64_t remote_oid_p)
-    : SchemaCatalogEntry(catalog_p, info_p), parent_schema(parent_schema_p), remote_oid(remote_oid_p) {
+    : SchemaCatalogEntry(catalog_p, info_p, parent_schema_p), remote_oid(remote_oid_p) {
 	schemas = make_uniq<QuackCatalogSet>(catalog_p.Cast<QuackCatalog>());
 	tables = make_uniq<QuackTableSet>(*this);
 }
@@ -102,7 +102,7 @@ QuackSchemaCatalogEntry::QuackSchemaCatalogEntry(Catalog &catalog_p, CreateSchem
 QuackSchemaCatalogEntry::QuackSchemaCatalogEntry(ClientContext &context, Catalog &catalog_p, CreateSchemaInfo &info_p,
                                                  optional_ptr<SchemaCatalogEntry> parent_schema_p, int64_t remote_oid_p,
                                                  const QuackLoadCatalogData &load_data)
-    : SchemaCatalogEntry(catalog_p, info_p), parent_schema(parent_schema_p), remote_oid(remote_oid_p) {
+    : SchemaCatalogEntry(catalog_p, info_p, parent_schema_p), remote_oid(remote_oid_p) {
 	schemas = make_uniq<QuackCatalogSet>(catalog_p.Cast<QuackCatalog>());
 	tables = make_uniq<QuackTableSet>(context, *this, load_data);
 }

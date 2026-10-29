@@ -178,10 +178,13 @@ QuackSchemaSet &QuackCatalog::GetSchemas(ClientContext &context) {
 
 shared_ptr<QuackSchemaSet> QuackCatalog::AcquireSnapshot(ClientContext &context) {
 	auto uses_published = ServesOwnConnection(context);
+	auto no_load_running = [this]() DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
+		return !loading_context;
+	};
 	unique_lock<mutex> guard(snapshot_lock);
 	while (loaded_version != invalidated_version && !uses_published && loading_context.get() != &context) {
 		if (loading_context) {
-			snapshot_loaded.wait(guard);
+			snapshot_lock.Await(absl::Condition(&no_load_running));
 			continue;
 		}
 		auto target_version = invalidated_version;
@@ -197,7 +200,6 @@ shared_ptr<QuackSchemaSet> QuackCatalog::AcquireSnapshot(ClientContext &context)
 		}
 		guard.lock();
 		loading_context = nullptr;
-		snapshot_loaded.notify_all();
 		if (failure) {
 			std::rethrow_exception(failure);
 		}

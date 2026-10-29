@@ -278,6 +278,10 @@ onlyif worker=1
 statement ok
 PREPARE p AS select i from rpc.t
 
+onlyif worker=1
+statement ok
+DEALLOCATE p
+
 endloop
 
 endloop

@@ -8,8 +8,6 @@
 #include "duckdb/parallel/interrupt.hpp"
 #include "duckdb/parallel/scan_read_ahead.hpp"
 
-#include <chrono>
-#include <condition_variable>
 #include <map>
 #include <set>
 
@@ -68,19 +66,20 @@ public:
 
 	//! Publish a batch under its dense index. The call waits until the batch fits. An empty buffer
 	//! and the head of the stream always admit one, so the producer cannot deadlock.
-	void PushBatch(idx_t batch_index, PAYLOAD payload, idx_t bytes = 0) {
+	void PushBatch(idx_t batch_index, PAYLOAD payload, idx_t bytes = 0) DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
 		shared_ptr<ReadAheadJobCompletion> waiter;
 		{
-			annotated_unique_lock<annotated_mutex> guard(lock);
+			annotated_lock_guard<annotated_mutex> guard(lock);
 			if (Seen(batch_index)) {
 				// a transport retry delivered this batch again
 				return;
 			}
 			// The head of the stream always gets in. Later batches cannot starve the next pop.
-			while (capacity > 0 && buffered_bytes > 0 && buffered_bytes + bytes > capacity && !finished && !errored &&
-			       !HeadOfStream(batch_index)) {
-				cv.wait(guard);
-			}
+			auto fits = [&]() DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
+				return capacity == 0 || buffered_bytes == 0 || buffered_bytes + bytes <= capacity || finished ||
+				       errored || HeadOfStream(batch_index);
+			};
+			lock.Await(absl::Condition(&fits));
 			if (finished || errored) {
 				return;
 			}
@@ -98,7 +97,6 @@ public:
 				waiters.erase(entry);
 			}
 		}
-		cv.notify_all();
 		if (waiter) {
 			waiter->FinishIOTask();
 		}
@@ -134,7 +132,6 @@ public:
 				waiters.erase(entry);
 			}
 		}
-		cv.notify_all();
 		if (waiter) {
 			waiter->FinishIOTask();
 		}
@@ -183,7 +180,6 @@ public:
 				return PopStatus::EMPTY;
 			}
 		}
-		cv.notify_all(); // pushers may be waiting on capacity
 		WakeCapacity(capacity_wakes);
 		return status;
 	}
@@ -205,27 +201,26 @@ public:
 			batches.erase(entry);
 			capacity_wakes = TakeCapacityWaiters();
 		}
-		cv.notify_all(); // pushers may be waiting on capacity
 		WakeCapacity(capacity_wakes);
 		return PopStatus::BATCH;
 	}
 
-	void WaitForBatch(idx_t claim) {
-		annotated_unique_lock<annotated_mutex> guard(lock);
-		if (batches.find(claim) != batches.end() || finished || errored) {
-			return;
-		}
+	void WaitForBatch(idx_t claim) DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		auto ready = [&]() DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
+			return batches.find(claim) != batches.end() || finished || errored;
+		};
 		// The wait has a limit, so the consumer can look for a cancel again.
-		cv.wait_for(guard, std::chrono::milliseconds(200));
+		lock.AwaitWithTimeout(absl::Condition(&ready), absl::Milliseconds(200));
 	}
 
-	void WaitForAny() {
-		annotated_unique_lock<annotated_mutex> guard(lock);
-		if (!batches.empty() || finished || errored) {
-			return;
-		}
+	void WaitForAny() DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		auto ready = [&]() DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
+			return !batches.empty() || finished || errored;
+		};
 		// The wait has a limit, so the consumer can look for a cancel again.
-		cv.wait_for(guard, std::chrono::milliseconds(200));
+		lock.AwaitWithTimeout(absl::Condition(&ready), absl::Milliseconds(200));
 	}
 
 	//! End the stream. With expected_total set, a different push count becomes an error.
@@ -245,7 +240,6 @@ public:
 			waiters.clear();
 			capacity_wakes = TakeCapacityWaiters();
 		}
-		cv.notify_all();
 		for (auto &entry : drained) {
 			entry.second->FinishIOTask();
 		}
@@ -266,7 +260,6 @@ public:
 			waiters.clear();
 			capacity_wakes = TakeCapacityWaiters();
 		}
-		cv.notify_all();
 		for (auto &entry : drained) {
 			entry.second->FinishIOTask();
 		}
@@ -331,7 +324,6 @@ private:
 	};
 
 	annotated_mutex lock;
-	std::condition_variable cv;
 	idx_t next_claim DUCKDB_GUARDED_BY(lock) = 1;
 	std::map<idx_t, Entry> batches DUCKDB_GUARDED_BY(lock);
 	idx_t buffered_bytes DUCKDB_GUARDED_BY(lock) = 0;

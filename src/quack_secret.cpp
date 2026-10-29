@@ -78,18 +78,6 @@ bool QuackSecret::TryGetEndpoint(const SecretEntry &entry, string &result) {
 	return found;
 }
 
-void QuackSecret::CreateDefault(ClientContext &context, const string &token) {
-	CreateSecretInput input;
-	input.type = Identifier(TYPE);
-	input.name = Identifier(DEFAULT_NAME);
-	// an empty scope leaves the catch-all `quack:` default in place, exactly like an unnamed CREATE SECRET
-	input.options["token"] = Value(token);
-	input.persist_type = SecretPersistType::PERSISTENT;
-	// the secret is a convenience, so a name that is already taken is not worth failing the server over
-	input.on_conflict = OnCreateConflict::IGNORE_ON_CONFLICT;
-	SecretManager::Get(context).CreateSecret(context, input);
-}
-
 string QuackSecret::GetToken(const SecretEntry &entry) {
 	auto &kv_secret = dynamic_cast<const KeyValueSecret &>(*entry.secret);
 	Value token_value;
@@ -98,16 +86,6 @@ string QuackSecret::GetToken(const SecretEntry &entry) {
 		                            entry.secret->GetName().GetIdentifierName());
 	}
 	return token_value.ToString();
-}
-
-bool QuackSecret::TryGetSslFingerprint(const SecretEntry &entry, string &result) {
-	auto &kv_secret = dynamic_cast<const KeyValueSecret &>(*entry.secret);
-	Value fingerprint_value;
-	if (!kv_secret.TryGetValue("ssl_fingerprint", fingerprint_value) || fingerprint_value.IsNull()) {
-		return false;
-	}
-	result = fingerprint_value.ToString();
-	return !result.empty();
 }
 
 } // namespace duckdb
