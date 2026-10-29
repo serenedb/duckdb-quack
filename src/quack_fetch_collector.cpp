@@ -25,7 +25,8 @@ struct QuackPreparedFetchBatch : public QuackPreparedBatch {
 //! The accumulation buffer IS the wire body: the FETCH handler writes the header and replies.
 class QuackFetchFragmentBuilder : public QuackFragmentBuilder {
 public:
-	explicit QuackFetchFragmentBuilder(idx_t size_hint) : writer(make_uniq<QuackChunkPayloadWriter>(size_hint)) {
+	QuackFetchFragmentBuilder(idx_t size_hint, bool serenedb_peer)
+	    : writer(make_uniq<QuackChunkPayloadWriter>(size_hint, serenedb_peer)) {
 	}
 
 	void Append(ClientContext &context, DataChunk &chunk) override {
@@ -67,7 +68,7 @@ public:
 	}
 
 	unique_ptr<QuackFragmentBuilder> OpenFragment(ClientContext &context, idx_t size_hint) override {
-		return make_uniq<QuackFetchFragmentBuilder>(size_hint);
+		return make_uniq<QuackFetchFragmentBuilder>(size_hint, stream->serenedb_peer);
 	}
 
 	//! NO_CAPACITY leaves the batch with the caller. A retry pushes the same batch again, which is
@@ -195,7 +196,7 @@ unique_ptr<PhysicalOperator> MakeQuackFetchCollector(ClientContext &context, Pre
 	for (auto &name : data.names) {
 		result_names.push_back(name.GetIdentifierName());
 	}
-	stream->SignalBound(data.types, std::move(result_names));
+	stream->SignalBound(data.types, std::move(result_names), false);
 	return make_uniq<QuackFetchCollector>(physical_plan, data, std::move(stream), order_mode);
 }
 
