@@ -76,6 +76,9 @@ QuackCatalog::QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri_p,
 	// load the entire catalog up-front, through the session of the attaching context
 	auto load_info = LoadCatalog(context);
 	snapshot = make_shared_ptr<QuackSchemaSet>(context, *this, load_info);
+	if (load_info.schemas->Count() > 0) {
+		default_schema = Identifier(load_info.schemas->GetValue(4, 0).GetValue<string>());
+	}
 	auto random = make_shared_ptr<RandomEngine>();
 	heartbeat.Start(
 	    QuackStorageExtensionInfo::GetState(*context.db).scheduler,
