@@ -228,6 +228,11 @@ QuackClientConnection::QuackClientConnection(DatabaseInstance &db_p, unique_ptr<
 	}
 }
 
+unique_ptr<PrepareRequestMessage> QuackClientConnection::MakePrepare(string sql, hugeint_t query_uuid) const {
+	statements_started++;
+	return make_uniq<PrepareRequestMessage>(connection_id, std::move(sql), query_uuid);
+}
+
 QuackClientConnection::~QuackClientConnection() {
 	heartbeat.Stop();
 	if (!cached_clients.empty()) {
