@@ -13,7 +13,7 @@
 
 namespace duckdb {
 
-//! Resolution of `quack` secrets, shared by the server side (quack_serve) and the client side (ATTACH).
+//! Resolution of `quack` secrets for the client side (ATTACH, quack_query).
 class QuackSecret {
 public:
 	//! The name of the quack secret type
@@ -22,7 +22,7 @@ public:
 	static constexpr const char *DEFAULT_NAME = "__default_quack";
 
 	//! How far an unnamed lookup may go. A secret scope is a match prefix, so a path that carries no endpoint
-	//! of its own (`quack_serve()`, `ATTACH 'quack:'`) only ever matches the catch-all `quack:` scope. There
+	//! of its own (`ATTACH 'quack:'`) only ever matches the catch-all `quack:` scope. There
 	//! the secret is what tells us the endpoint, so a lone quack secret is taken to be the default one;
 	//! ALLOW_SINGLE_SECRET asks for that fallback. A path with a real endpoint must honor scoping instead.
 	enum class DefaultLookup { SCOPE_MATCH_ONLY, ALLOW_SINGLE_SECRET };
@@ -38,11 +38,6 @@ public:
 	static bool TryGetEndpoint(const SecretEntry &entry, string &result);
 	//! The token stored in the secret - throws when the secret does not carry one
 	static string GetToken(const SecretEntry &entry);
-	//! The pinned server certificate fingerprint stored in the secret, if any
-	static bool TryGetSslFingerprint(const SecretEntry &entry, string &result);
-	//! Persist `token` as the default quack secret, so later sessions and clients pick it up without being
-	//! told the token. Does nothing when a secret of that name already exists.
-	static void CreateDefault(ClientContext &context, const string &token);
 };
 
 } // namespace duckdb

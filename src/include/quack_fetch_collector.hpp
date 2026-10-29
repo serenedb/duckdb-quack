@@ -10,16 +10,13 @@
 
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/serializer/memory_stream.hpp"
+#include "duckdb/execution/physical_operator.hpp"
+#include "duckdb/main/client_context.hpp"
+#include "duckdb/main/prepared_statement_data.hpp"
 
 #include "quack_claim_buffer.hpp"
 
-#include <condition_variable>
-
 namespace duckdb {
-
-class ClientContext;
-class PhysicalOperator;
-struct PreparedStatementData;
 
 //! One sealed FETCH_RESPONSE chunk blob. The serve path writes its header, with the client-visible
 //! index, directly before the blob.
@@ -42,33 +39,33 @@ struct QuackResultStream {
 	QuackFetchPayloadBuffer buffer;
 
 	void SignalBound(vector<LogicalType> types_p, vector<string> names_p) {
-		{
-			lock_guard<mutex> guard(bind_lock);
-			types = std::move(types_p);
-			names = std::move(names_p);
-			bound = true;
-		}
-		bind_cv.notify_all();
+		lock_guard<mutex> guard(bind_lock);
+		types = std::move(types_p);
+		names = std::move(names_p);
+		bound = true;
 	}
 
 	//! A scan of this statement registered a client data stream. The statement gives no row until the
 	//! client sends its batches, so PREPARE answers now.
 	void SignalClientDataPending() {
-		{
-			lock_guard<mutex> guard(bind_lock);
-			client_data_pending = true;
-		}
-		bind_cv.notify_all();
+		lock_guard<mutex> guard(bind_lock);
+		client_data_pending = true;
 	}
 
 	//! true = the query is planned, or it waits for client data. false = it failed first. The buffer
 	//! then holds the error.
-	bool WaitBound() {
-		unique_lock<mutex> guard(bind_lock);
-		while (!bound && !client_data_pending && !buffer.HasError() && !buffer.Exhausted()) {
-			bind_cv.wait_for(guard, std::chrono::milliseconds(50));
+	bool WaitBound() DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
+		auto signalled = [&]() DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
+			return bound || client_data_pending;
+		};
+		lock_guard<mutex> guard(bind_lock);
+		// The wait has a limit, so a failure the buffer reports ends it too.
+		while (!bind_lock.AwaitWithTimeout(absl::Condition(&signalled), absl::Milliseconds(50))) {
+			if (buffer.HasError() || buffer.Exhausted()) {
+				return false;
+			}
 		}
-		return bound || client_data_pending;
+		return true;
 	}
 
 	bool Bound() {
@@ -134,7 +131,6 @@ struct QuackResultStream {
 
 private:
 	mutex bind_lock;
-	std::condition_variable bind_cv;
 	bool bound = false;
 };
 

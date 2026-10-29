@@ -4,14 +4,13 @@
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/logging/logger.hpp"
+#include "duckdb/main/client_context.hpp"
 #include "duckdb/common/serializer/memory_stream.hpp"
 
 #include "quack_message.hpp"
 #include "quack_log.hpp"
 #include "quack_periodic_worker.hpp"
 #include "quack_uri.hpp"
-
-#include "httplib.hpp"
 
 namespace duckdb {
 class QuackClientConnection;
@@ -207,28 +206,6 @@ private:
 	//! Set by PrepareTeardownRequest(): cap the transport timeout and drop retries so the final
 	//! best-effort DisconnectMessage cannot hang the destructor on a dead peer.
 	bool teardown_request = false;
-};
-
-//! HTTPS client that trusts exactly one server certificate, the one whose SHA-256 fingerprint the URI
-//! pins (ssl_fingerprint), instead of the CA chain. Self-signed quack_serve certificates never verify
-//! against a CA, so this is how a client authenticates such a server. Talks httplib+OpenSSL directly:
-//! the httpfs transport has no pinning hook.
-class PinnedHttpsQuackClient : public QuackClient {
-public:
-	PinnedHttpsQuackClient(DatabaseInstance &db, const QuackUri &uri_p);
-	~PinnedHttpsQuackClient() override;
-
-	string PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size) override;
-	void PrepareTeardownRequest() override;
-
-private:
-	unique_ptr<QuackMessage> RequestInternal(optional_ptr<ClientContext> context,
-	                                         unique_ptr<QuackMessage> request_message) override;
-	//! POST bytes assuming request_mutex is already held.
-	string PostRawLocked(const_data_ptr_t data, idx_t size);
-
-private:
-	unique_ptr<duckdb_httplib_openssl::Client> https_client;
 };
 
 } // namespace duckdb

@@ -5,6 +5,7 @@
 
 #include "duckdb/common/chrono.hpp"
 #include "duckdb/common/atomic.hpp"
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/optional_ptr.hpp"
@@ -14,8 +15,6 @@
 #include "quack_result_cache.hpp"
 #include "quack_uri.hpp"
 
-#include "httplib.hpp" // TODO forward declare
-
 namespace duckdb {
 
 class ClientContext;
@@ -24,7 +23,6 @@ class Connection;
 class MemoryStream;
 class DatabaseInstance;
 struct QuackResultStream;
-class ErrorData;
 
 enum class QuackQueryState : uint8_t { IDLE, ACTIVE, FINISHED, CANCELLED };
 
@@ -111,8 +109,6 @@ struct QuackConnectionSnapshot {
 	optional_idx cached_rows;
 };
 
-enum class QuackServerState { UNINITIALIZED, WAITING_TO_START, RUNNING, CLOSED };
-
 struct CacheExpiryEntry {
 	timestamp_t served_at;
 	string connection_id;
@@ -128,17 +124,6 @@ class QuackServer {
 public:
 	explicit QuackServer(ClientContext &context_p, const QuackUri &uri_p, const string &token_p);
 	virtual ~QuackServer();
-
-	//! Stop accepting new connections (close the listener socket) without
-	//! joining listener threads. Safe to call from a request-handler thread —
-	//! does not wait on httplib's task-queue, which would deadlock when the
-	//! caller is itself a worker.
-	virtual void StopAccepting() {};
-
-	//! Synchronously stop accepting connections and join the listener threads.
-	//! Must NOT be called from a worker / request-handler thread; httplib's
-	//! listen-loop teardown joins all workers, which would deadlock.
-	virtual void Close() {};
 
 	shared_ptr<QuackConnection> GetConnection(const string &connection_id);
 	string CreateNewConnection(const string &connection_id, const string &client_id_hash,
@@ -160,17 +145,6 @@ public:
 		return uri;
 	}
 
-	//! SHA-256 fingerprint of the certificate served over HTTPS, empty for plain HTTP. Clients pin it
-	//! with ssl_fingerprint.
-	const string &SslFingerprint() const {
-		return ssl_fingerprint;
-	}
-
-	idx_t ActiveConnectionCount() {
-		std::lock_guard<std::mutex> lock(active_connections_mutex);
-		return active_connections.size();
-	}
-
 protected:
 	//! Handle one request, turning any exception raised along the way into an ErrorResponse
 	unique_ptr<QuackMessage> HandleMessage(MemoryStream &read_stream);
@@ -183,8 +157,6 @@ protected:
 	                                               optional_ptr<QuackConnection> connection);
 
 protected:
-	std::vector<std::thread> listen_threads;
-
 	weak_ptr<DatabaseInstance> db_ptr;
 	mutex active_connections_mutex;
 	unordered_map<string, shared_ptr<QuackConnection>> active_connections;
@@ -194,7 +166,6 @@ protected:
 	std::priority_queue<CacheExpiryEntry, vector<CacheExpiryEntry>, CacheExpiresLater> cache_expiry_queue;
 
 	QuackUri uri;
-	string ssl_fingerprint;
 
 private:
 	bool RenewConnectionLease(const string &connection_id, const shared_ptr<QuackConnection> &connection);
@@ -205,26 +176,6 @@ private:
 	string token;
 	//! Per-server random key that seeds the HMAC for client_id_hash.
 	string server_hmac_key;
-};
-
-class HttpQuackServer : public QuackServer {
-public:
-	//! Listens over HTTPS when `uri_p.Ssl()`, using the PEM files given (both or neither); without them
-	//! the default self-signed pair in DuckDB's certificate directory is used, generated on first use.
-	HttpQuackServer(ClientContext &context_p, const QuackUri &uri_p, const string &token_p,
-	                const string &ssl_cert_file = string(), const string &ssl_key_file = string());
-
-	void StopAccepting() override;
-	void Close() override;
-
-	~HttpQuackServer() override;
-
-private:
-	static void ListenThread(HttpQuackServer *server, const string &listen_host, uint16_t listen_port);
-
-	unique_ptr<duckdb_httplib_openssl::Server> server;
-	mutex state_lock;
-	atomic<QuackServerState> server_state {QuackServerState::UNINITIALIZED};
 };
 
 } // namespace duckdb

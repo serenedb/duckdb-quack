@@ -26,7 +26,6 @@
 #include "quack_scan_from_client.hpp"
 #include "quack_secret.hpp"
 #include "quack_cancel.hpp"
-#include "quack_startstop.hpp"
 #include "quack_storage.hpp"
 #include "quack_uri.hpp"
 
@@ -52,9 +51,6 @@ static unique_ptr<BaseSecret> CreateQuackSecretFromConfig(ClientContext &, Creat
 		} else if (lower_name == "extra_http_headers") {
 			// Stored as a MAP(VARCHAR, VARCHAR) Value; injected into every quack HTTP request.
 			secret->secret_map["extra_http_headers"] = named_param.second;
-		} else if (lower_name == "ssl_fingerprint") {
-			// validated here so a typo fails at CREATE SECRET rather than at the first connection
-			secret->secret_map["ssl_fingerprint"] = QuackUri::NormalizeFingerprint(named_param.second.ToString());
 		} else {
 			throw InvalidInputException("Unknown named parameter for quack secret: %s", lower_name);
 		}
@@ -74,7 +70,6 @@ static void RegisterQuackSecretType(ExtensionLoader &loader) {
 	CreateSecretFunction config_fun = {QuackSecret::TYPE, "config", CreateQuackSecretFromConfig};
 	config_fun.named_parameters["token"] = LogicalType::VARCHAR;
 	config_fun.named_parameters["extra_http_headers"] = LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR);
-	config_fun.named_parameters["ssl_fingerprint"] = LogicalType::VARCHAR;
 	loader.RegisterFunction(config_fun);
 }
 
@@ -198,14 +193,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          LogicalType::UBIGINT, Value::UBIGINT(QUACK_SERVER_STREAM_BUFFER_BYTES_DEFAULT), nullptr,
 	                          SetScope::GLOBAL);
 
-	config.AddExtensionOption("quack_server_max_connections",
-	                          "Maximum concurrent connections the RPC server accepts; beyond this new "
-	                          "connections are refused",
-	                          LogicalType::UBIGINT, Value::UBIGINT(1024), nullptr, SetScope::GLOBAL);
-	config.AddExtensionOption("quack_server_keep_alive_timeout",
-	                          "Seconds an idle keep-alive connection is kept open by the RPC server",
-	                          LogicalType::UBIGINT, Value::UBIGINT(300), nullptr, SetScope::GLOBAL);
-
 	// Default client_id handed to any ATTACH / quack_query that doesn't pass one explicitly
 	string default_client_id;
 	if (const char *env_client_id = std::getenv("QUACK_CLIENT_ID")) {
@@ -281,11 +268,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(QuackScanFunction::GetFunction());
 	loader.RegisterFunction(QuackScanByNameFunction::GetFunction());
 	loader.RegisterFunction(QuackScanFromClientFunction::GetFunction());
-	loader.RegisterFunction(QuackServeFunction::GetFunction());
 	loader.RegisterFunction(QuackCancelFunction::GetFunction());
-	loader.RegisterFunction(QuackStopFunction::GetFunction());
-	loader.RegisterFunction(QuackServerListFunction::GetFunction());
-	loader.RegisterFunction(QuackGenerateKeysFunction::GetFunction());
 	loader.RegisterFunction(QuackClearCacheFunction::GetFunction());
 	loader.RegisterFunction(GetQuackIdentifyFunction());
 	loader.RegisterFunction(QuackActiveConnectionsFunction::GetFunction());
@@ -294,7 +277,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// (ab)use storage extension info to store our state
 	auto ext = duckdb::make_shared_ptr<QuackStorageExtension>();
-	ext->storage_info = duckdb::make_uniq<QuackStorageExtensionInfo>();
+	ext->storage_info = duckdb::make_shared_ptr<QuackStorageExtensionInfo>();
 	StorageExtension::Register(loader.GetDatabaseInstance().config, QuackStorageExtensionInfo::STORAGE_EXTENSION_KEY,
 	                           ext);
 
