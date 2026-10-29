@@ -23,6 +23,7 @@ static bool IsBareQuackPath(const string &uri) {
 static unique_ptr<Catalog> QuackAttach(optional_ptr<StorageExtensionInfo> storage_info, ClientContext &context,
                                        AttachedDatabase &db, const string &name, AttachInfo &info,
                                        AttachOptions &attach_options) {
+	QuackStorageExtensionInfo::CheckAccess(context, QuackAccess::CONNECT);
 	// writes are pushed down to the server as whole statements, so a read-only attach cannot be enforced yet
 	if (attach_options.access_mode == AccessMode::READ_ONLY) {
 		throw NotImplementedException("READ_ONLY is not currently supported for Quack databases - attach \"%s\" "
@@ -104,6 +105,13 @@ QuackStorageExtensionInfo &QuackStorageExtensionInfo::GetState(const DatabaseIns
 		throw InternalException("The quack extension is not loaded");
 	}
 	return static_cast<QuackStorageExtensionInfo &>(*extension->storage_info);
+}
+
+void QuackStorageExtensionInfo::CheckAccess(ClientContext &context, QuackAccess access, const Identifier &catalog) {
+	auto &state = GetState(*context.db);
+	if (state.access_check) {
+		state.access_check(context, access, catalog);
+	}
 }
 
 void QuackStorageExtensionInfo::RunInBackground(const DatabaseInstance &instance, std::function<void()> task) {
