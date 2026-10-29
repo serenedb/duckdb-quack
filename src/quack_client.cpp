@@ -174,13 +174,17 @@ void HttpsQuackClient::EnsureHttpParams(optional_ptr<ClientContext> context) {
 	if (!http_params) {
 		auto &http_util = HTTPUtil::Get(db);
 		auto request_url = uri.Http() + "/quack";
+		// A commit's requests run after the context let go of its transaction, so they read the database's
+		// settings and secrets
+		optional_ptr<ClientContext> transaction_context;
 		if (context && context->transaction.HasActiveTransaction()) {
+			transaction_context = context;
 			http_params = http_util.InitializeParameters(*context, request_url);
 		} else {
 			http_params = http_util.InitializeParameters(db, request_url);
 		}
 		// Resolve EXTRA_HTTP_HEADERS from the quack secret once; reused for every request on this client.
-		LoadExtraHttpHeaders(context, db, uri, extra_headers);
+		LoadExtraHttpHeaders(transaction_context, db, uri, extra_headers);
 	}
 	http_params->timeout = HTTP_TIMEOUT_SECONDS;
 	http_params->retries = 0;
