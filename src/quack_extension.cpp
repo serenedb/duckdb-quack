@@ -43,6 +43,11 @@ static void RequireServerAccess(ClientContext &context, SetScope, Value &) {
 	QuackStorageExtensionInfo::CheckAccess(context, QuackAccess::SERVER);
 }
 
+static void ValidateServerHeartbeatTimeout(ClientContext &context, SetScope scope, Value &parameter) {
+	RequireServerAccess(context, scope, parameter);
+	ValidateHeartbeatTimeoutSetting(context, scope, parameter);
+}
+
 static unique_ptr<BaseSecret> CreateQuackSecretFromConfig(ClientContext &, CreateSecretInput &input) {
 	auto scope = input.scope;
 	if (scope.empty()) {
@@ -192,6 +197,15 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "Milliseconds a statement without statement_timeout may wait for a SereneDB Quack "
 	                          "server before it fails, so a server that is gone cannot hold it (0 = no limit)",
 	                          LogicalType::UBIGINT, Value::UBIGINT(QUACK_DEFAULT_STATEMENT_TIMEOUT_MS_DEFAULT));
+
+	config.AddExtensionOption("quack_max_heartbeat_timeout",
+	                          "Most seconds a server keeps a session without a request from its client; a client "
+	                          "asking for longer gets this",
+	                          LogicalType::UBIGINT, Value::UBIGINT(QUACK_MAX_HEARTBEAT_TIMEOUT_DEFAULT),
+	                          ValidateServerHeartbeatTimeout, SetScope::GLOBAL);
+
+	config.AddExtensionOption("quack_max_sessions", "Most sessions a server keeps open at once (0 = unlimited)",
+	                          LogicalType::UBIGINT, Value::UBIGINT(0), RequireServerAccess, SetScope::GLOBAL);
 
 	config.AddExtensionOption("quack_enable_reconnects",
 	                          "Enable reconnect support (clients acknowledge results, the server caches the last "

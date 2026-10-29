@@ -16,6 +16,8 @@
 
 #include "mbedtls_wrapper.hpp"
 
+#include <absl/cleanup/cleanup.h>
+
 namespace duckdb {
 
 static bool LeaseTimeoutElapsed(time_point<steady_clock> last_renewed_at, time_point<steady_clock> now,
@@ -498,6 +500,29 @@ unique_ptr<QuackMessage> QuackServer::Connect(QuackRequest &request, QuackServer
 		return make_uniq<ErrorResponse>(StringUtil::Format(
 		    "heartbeat_timeout out of range - must be between 1 and %llu seconds", MAX_HEARTBEAT_TIMEOUT_SECONDS));
 	}
+	auto db = db_ptr.lock();
+	if (!db) {
+		return make_uniq<ErrorResponse>("Database was closed");
+	}
+	heartbeat_timeout_seconds =
+	    MinValue(heartbeat_timeout_seconds,
+	             QuackGetUBigintSetting(*db, "quack_max_heartbeat_timeout", QUACK_MAX_HEARTBEAT_TIMEOUT_DEFAULT));
+	auto max_sessions = QuackGetUBigintSetting(*db, "quack_max_sessions", 0);
+	{
+		lock_guard<mutex> lock(active_connections_mutex);
+		if (max_sessions != 0 && active_connections.size() + opening_connections >= max_sessions) {
+			return make_uniq<ErrorResponse>(
+			    StringUtil::Format("Too many Quack sessions: the server keeps at most %llu", max_sessions));
+		}
+		opening_connections++;
+	}
+	bool registered = false;
+	absl::Cleanup release_slot = [&] {
+		if (!registered) {
+			lock_guard<mutex> lock(active_connections_mutex);
+			opening_connections--;
+		}
+	};
 	auto connection_id = GenerateConnectionId();
 	auto host_session = host.OpenSession(connection_id, connection_request_message);
 	// scan_data_from_quack_client registers its streams here, and SEND_DATA finds them by connection.
@@ -514,6 +539,8 @@ unique_ptr<QuackMessage> QuackServer::Connect(QuackRequest &request, QuackServer
 		lock_guard<mutex> lock(active_connections_mutex);
 		D_ASSERT(active_connections.find(connection_id) == active_connections.end());
 		active_connections[connection_id] = std::move(connection);
+		opening_connections--;
+		registered = true;
 	}
 	auto response = make_uniq<ConnectionResponseMessage>(connection_id, quack_version, heartbeat_timeout_seconds);
 	response->SetSereneDB(request.serenedb_client);
