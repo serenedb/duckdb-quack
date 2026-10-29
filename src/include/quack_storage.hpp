@@ -46,6 +46,12 @@ public:
 	//! The connections of every server, as quack_active_connections() lists them
 	vector<QuackConnectionSnapshot> GetActiveConnectionSnaps();
 
+	//! Whether `host`:`port` reaches a quack listener of this database. A session on itself would wait for its own
+	//! threads, so the client refuses one.
+	using ServesFunction = std::function<bool(const string &host, uint16_t port)>;
+	void SetServes(ServesFunction serves_p);
+	bool Serves(const string &host, uint16_t port);
+
 	//! Set before the database runs a query
 	QuackAccessCheck access_check;
 	//! Where heartbeats and the requests nobody waits for run; without one, each heartbeat has a thread of its own
@@ -54,6 +60,8 @@ public:
 private:
 	mutex servers_lock;
 	vector<reference<QuackServer>> servers;
+	mutex serves_lock;
+	ServesFunction serves;
 };
 
 } // namespace duckdb
