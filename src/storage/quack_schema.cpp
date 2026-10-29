@@ -85,7 +85,7 @@ WITH RECURSIVE schema_tree AS (
 	FROM duckdb_schemas() nested
 	JOIN schema_tree parent ON nested.parent_schema_oid = parent.oid
 )
-SELECT oid, database_name, schema_path, current_database()
+SELECT oid, database_name, schema_path, current_database(), current_schema()
 FROM schema_tree
 WHERE database_name NOT IN ('system', 'temp')
 ORDER BY (database_name = current_database()) DESC, database_name, length(schema_path), schema_path
