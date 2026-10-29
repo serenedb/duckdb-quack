@@ -30,6 +30,10 @@ public:
 	string GetCatalogType() override {
 		return "quack";
 	}
+	//! The schema an unqualified name means on the server
+	optional<Identifier> GetDefaultSchema() const override {
+		return default_schema;
+	}
 	static QuackCatalog &GetQuackCatalog(ClientContext &context, Value &catalog_name);
 	static bool IsQuackScan(const string &name);
 	bool SupportsPushdown(const TableRef &ref) override;
@@ -121,6 +125,7 @@ private:
 	idx_t invalidated_version = 0;
 	idx_t loaded_version = 0;
 	optional_ptr<ClientContext> loading_context;
+	Identifier default_schema = Identifier(DEFAULT_SCHEMA);
 };
 
 } // namespace duckdb
