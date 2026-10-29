@@ -9,7 +9,8 @@
 
 namespace duckdb {
 
-struct ClearCacheFunctionData : public TableFunctionData {
+//! Per execution, so a prepared statement clears the caches every time it runs
+struct ClearCacheGlobalState : public GlobalTableFunctionState {
 	bool finished = false;
 };
 
@@ -17,7 +18,11 @@ unique_ptr<FunctionData> ClearCacheBind(ClientContext &, TableFunctionBindInput 
                                         vector<Identifier> &names) {
 	return_types.emplace_back(LogicalType::BOOLEAN);
 	names.emplace_back("Success");
-	return make_uniq<ClearCacheFunctionData>();
+	return make_uniq<TableFunctionData>();
+}
+
+unique_ptr<GlobalTableFunctionState> ClearCacheInitGlobal(ClientContext &, TableFunctionInitInput &) {
+	return make_uniq<ClearCacheGlobalState>();
 }
 
 void ClearQuackCaches(ClientContext &context) {
@@ -32,16 +37,16 @@ void ClearQuackCaches(ClientContext &context) {
 }
 
 void ClearCacheFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &) {
-	auto &data = data_p.bind_data->CastNoConst<ClearCacheFunctionData>();
-	if (data.finished) {
+	auto &state = data_p.global_state->Cast<ClearCacheGlobalState>();
+	if (state.finished) {
 		return;
 	}
 	ClearQuackCaches(context);
-	data.finished = true;
+	state.finished = true;
 }
 
 TableFunction QuackClearCacheFunction::GetFunction() {
-	return TableFunction("quack_clear_cache", {}, ClearCacheFunction, ClearCacheBind);
+	return TableFunction("quack_clear_cache", {}, ClearCacheFunction, ClearCacheBind, ClearCacheInitGlobal);
 }
 
 } // namespace duckdb
