@@ -70,21 +70,23 @@ unique_ptr<GlobalSinkState> QuackInsert::GetGlobalSinkState(ClientContext &conte
 	auto stream_id = UUID::ToString(UUID::GenerateRandomUUID());
 	auto query_uuid = UUID::GenerateRandomUUID();
 	// The remote name carries the full nested-schema path, so the server resolves the same table.
-	auto remote_name = table_entry->schema.Cast<QuackSchemaCatalogEntry>().GetRemoteName(table_entry->name);
+	auto remote_name = QualifiedName(table_entry->ParentSchemaPath(), table_entry->name);
 	auto sql = StringUtil::Format(
 	    "INSERT INTO %s SELECT * FROM scan_data_from_quack_client(%s, NULL::%s, ordered := %s)", remote_name.ToString(),
 	    SQLString(stream_id), StructPrototype(types), order_mode != AppendOrderMode::UNORDERED ? "true" : "false");
 
+	// joining the statement's transaction forgets a session the server lost
+	auto &transaction = QuackTransaction::Get(context, quack_catalog);
 	if (!context.transaction.IsAutoCommit()) {
-		QuackTransaction::Get(context, quack_catalog).ForceStart();
+		transaction.ForceStart();
 	}
 
 	// inline_rows = 0, because the statement waits for our batches and has no row to answer with. The
 	// scan registers the stream while it binds, so PREPARE must land before the first batch.
-	auto client_wrapper = quack_catalog.GetClientConnection()->GetClient(context);
-	auto prepare = make_uniq<PrepareRequestMessage>(quack_catalog.GetConnectionId(), sql, query_uuid);
+	auto session = quack_catalog.GetClientConnection(context);
+	auto prepare = session->MakePrepare(sql, query_uuid);
 	prepare->SetInlineRows(optional_idx(0));
-	client_wrapper->GetClient().Request<PrepareResponseMessage>(context, std::move(prepare));
+	session->Prepare(context, std::move(prepare));
 
 	auto emitter = MakeQuackSendDataEmitter(context, *table_entry, std::move(stream_id), query_uuid, debug_delay_ms,
 	                                        debug_duplicate_sends, debug_drop_batch);

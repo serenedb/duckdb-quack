@@ -1,5 +1,3 @@
-#include <thread>
-
 #include "duckdb/common/exception/binder_exception.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/main/database.hpp"
@@ -9,90 +7,10 @@
 #include "quack_storage.hpp"
 #include "quack_client.hpp"
 #include "quack_secret.hpp"
-#include "quack_server.hpp"
 #include "storage/quack_catalog.hpp"
 #include "storage/quack_transaction_manager.hpp"
 
 using namespace duckdb;
-
-QuackStorageExtensionInfo &QuackStorageExtensionInfo::GetState(const DatabaseInstance &instance) {
-	auto &config = instance.config;
-	auto ext = StorageExtension::Find(config, STORAGE_EXTENSION_KEY);
-	if (!ext) {
-		throw std::runtime_error("Fatal error: couldn't find quack extension state.");
-	}
-	return *static_cast<QuackStorageExtensionInfo *>(ext->storage_info.get());
-}
-
-QuackServer &QuackStorageExtensionInfo::CreateServer(ClientContext &context, const QuackUri &listen_uri,
-                                                     const string &token, const string &ssl_cert_file,
-                                                     const string &ssl_key_file) {
-	auto server = make_uniq<HttpQuackServer>(context, listen_uri, token, ssl_cert_file, ssl_key_file);
-
-	auto &actual_uri = server->ListenUri();
-	auto key = actual_uri.CanonicalUri();
-	std::lock_guard<std::mutex> lock(servers_mutex);
-	auto it = servers.find(key);
-	if (it != servers.end()) {
-		throw InvalidInputException("Server already exists for %s", key);
-	}
-	servers.emplace(key, std::move(server));
-	return *servers[key];
-}
-
-vector<QuackStorageExtensionInfo::ServerSnapshot> QuackStorageExtensionInfo::ListServers() {
-	vector<ServerSnapshot> result;
-	std::lock_guard<std::mutex> lock(servers_mutex);
-	result.reserve(servers.size());
-	for (auto &kv : servers) {
-		auto &uri = kv.second->ListenUri();
-		ServerSnapshot snap;
-		snap.listen_uri = uri.Uri();
-		snap.listen_url = uri.Http();
-		snap.host = uri.Host();
-		snap.port = uri.Port();
-		snap.active_connections = kv.second->ActiveConnectionCount();
-		snap.info.emplace_back("ipv6", uri.IPv6() ? "true" : "false");
-		snap.info.emplace_back("ssl", uri.Ssl() ? "true" : "false");
-		if (uri.Ssl()) {
-			snap.info.emplace_back("ssl_fingerprint", kv.second->SslFingerprint());
-		}
-		result.push_back(std::move(snap));
-	}
-	return result;
-}
-
-vector<QuackConnectionSnapshot> QuackStorageExtensionInfo::GetActiveConnectionSnaps() {
-	vector<QuackConnectionSnapshot> result;
-	std::lock_guard<std::mutex> lock(servers_mutex);
-	for (auto &server_kv : servers) {
-		auto &uri = server_kv.first;
-		auto &server = server_kv.second;
-		for (auto &snapshot : server->GetActiveConnectionSnap()) {
-			snapshot.server_id = uri;
-			result.push_back(std::move(snapshot));
-		}
-	}
-	return result;
-}
-
-bool QuackStorageExtensionInfo::StopServer(ClientContext &context, const QuackUri &listen_uri) {
-	unique_ptr<QuackServer> to_destroy;
-	{
-		std::lock_guard<std::mutex> lock(servers_mutex);
-		const auto it = servers.find(listen_uri.CanonicalUri());
-		if (it == servers.end()) {
-			return false;
-		}
-		to_destroy = std::move(it->second);
-		servers.erase(it);
-	}
-	// Synchronously free the listening port
-	to_destroy->StopAccepting();
-	// Full destruction (httplib worker-pool join) runs off-thread
-	std::thread([srv = std::move(to_destroy)]() mutable { srv.reset(); }).detach();
-	return true;
-}
 
 //! A path is bare when it carries no host: `ATTACH 'quack:'` (or an empty path, once the "quack:" prefix
 //! has been stripped by the ATTACH binder). The endpoint then comes from the secret.
@@ -105,6 +23,7 @@ static bool IsBareQuackPath(const string &uri) {
 static unique_ptr<Catalog> QuackAttach(optional_ptr<StorageExtensionInfo> storage_info, ClientContext &context,
                                        AttachedDatabase &db, const string &name, AttachInfo &info,
                                        AttachOptions &attach_options) {
+	QuackStorageExtensionInfo::CheckAccess(context, QuackAccess::CONNECT);
 	// writes are pushed down to the server as whole statements, so a read-only attach cannot be enforced yet
 	if (attach_options.access_mode == AccessMode::READ_ONLY) {
 		throw NotImplementedException("READ_ONLY is not currently supported for Quack databases - attach \"%s\" "
@@ -112,8 +31,8 @@ static unique_ptr<Catalog> QuackAttach(optional_ptr<StorageExtensionInfo> storag
 		                              name);
 	}
 	// the options the core did not consume are ours; the parser lower-cases their names
-	static const unordered_set<string> KNOWN_OPTIONS {"token",           "secret",    "disable_ssl",
-	                                                  "ssl_fingerprint", "client_id", "heartbeat_timeout"};
+	static const unordered_set<string> KNOWN_OPTIONS {"token", "secret", "disable_ssl", "client_id",
+	                                                  "heartbeat_timeout"};
 	for (auto &entry : attach_options.options) {
 		if (KNOWN_OPTIONS.find(entry.first) == KNOWN_OPTIONS.end()) {
 			throw BinderException("Unrecognized option for attach \"%s\"", entry.first);
@@ -152,21 +71,6 @@ static unique_ptr<Catalog> QuackAttach(optional_ptr<StorageExtensionInfo> storag
 	if (disable_ssl_entry != attach_options.options.end()) {
 		enable_ssl = !disable_ssl_entry->second.GetValue<bool>();
 	}
-	// a pinned server certificate: explicit option first, then the secret we already resolved
-	string ssl_fingerprint;
-	auto fingerprint_entry = attach_options.options.find("ssl_fingerprint");
-	if (fingerprint_entry != attach_options.options.end()) {
-		ssl_fingerprint = fingerprint_entry->second.ToString();
-	} else if (secret) {
-		QuackSecret::TryGetSslFingerprint(*secret, ssl_fingerprint);
-	}
-	if (!ssl_fingerprint.empty()) {
-		if (!enable_ssl && disable_ssl_entry != attach_options.options.end()) {
-			throw InvalidInputException("ssl_fingerprint pins the server's TLS certificate and cannot be combined "
-			                            "with disable_ssl");
-		}
-		enable_ssl = true;
-	}
 	string token;
 	if (has_token) {
 		token = token_entry->second.GetValue<string>();
@@ -180,9 +84,6 @@ static unique_ptr<Catalog> QuackAttach(optional_ptr<StorageExtensionInfo> storag
 	auto heartbeat_timeout = QuackClient::ResolveHeartbeatTimeout(
 	    context, heartbeat_timeout_entry != attach_options.options.end() ? &heartbeat_timeout_entry->second : nullptr);
 	QuackUri server_uri(uri, enable_ssl);
-	if (!ssl_fingerprint.empty()) {
-		server_uri.SetSslFingerprint(ssl_fingerprint);
-	}
 	return make_uniq<QuackCatalog>(db, server_uri, context, token, std::move(client_id), heartbeat_timeout);
 }
 
@@ -195,4 +96,62 @@ static unique_ptr<TransactionManager> QuackCreateTransactionManager(optional_ptr
 QuackStorageExtension::QuackStorageExtension() {
 	attach = QuackAttach;
 	create_transaction_manager = QuackCreateTransactionManager;
+	storage_info = make_shared_ptr<QuackStorageExtensionInfo>();
+}
+
+QuackStorageExtensionInfo &QuackStorageExtensionInfo::GetState(const DatabaseInstance &instance) {
+	auto extension = StorageExtension::Find(instance.config, QuackStorageExtension::STORAGE_EXTENSION_KEY);
+	if (!extension) {
+		throw InternalException("The quack extension is not loaded");
+	}
+	return static_cast<QuackStorageExtensionInfo &>(*extension->storage_info);
+}
+
+void QuackStorageExtensionInfo::CheckAccess(ClientContext &context, QuackAccess access, const Identifier &catalog) {
+	auto &state = GetState(*context.db);
+	if (state.access_check) {
+		state.access_check(context, access, catalog);
+	}
+}
+
+void QuackStorageExtensionInfo::RunInBackground(const DatabaseInstance &instance, std::function<void()> task) {
+	auto &state = GetState(instance);
+	if (!state.scheduler) {
+		task();
+		return;
+	}
+	state.scheduler(milliseconds(0), std::move(task));
+}
+
+void QuackStorageExtensionInfo::SetServes(ServesFunction serves_p) {
+	lock_guard<mutex> guard(serves_lock);
+	serves = std::move(serves_p);
+}
+
+bool QuackStorageExtensionInfo::Serves(const string &host, uint16_t port) {
+	lock_guard<mutex> guard(serves_lock);
+	return serves && serves(host, port);
+}
+
+void QuackStorageExtensionInfo::AddServer(QuackServer &server) {
+	lock_guard<mutex> guard(servers_lock);
+	servers.push_back(server);
+}
+
+void QuackStorageExtensionInfo::RemoveServer(QuackServer &server) {
+	lock_guard<mutex> guard(servers_lock);
+	servers.erase(std::remove_if(servers.begin(), servers.end(),
+	                             [&](reference<QuackServer> entry) { return &entry.get() == &server; }),
+	              servers.end());
+}
+
+vector<QuackConnectionSnapshot> QuackStorageExtensionInfo::GetActiveConnectionSnaps() {
+	vector<QuackConnectionSnapshot> result;
+	lock_guard<mutex> guard(servers_lock);
+	for (auto &server : servers) {
+		for (auto &snapshot : server.get().GetActiveConnectionSnap()) {
+			result.push_back(std::move(snapshot));
+		}
+	}
+	return result;
 }

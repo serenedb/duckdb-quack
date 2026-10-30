@@ -2,26 +2,47 @@
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/common/random_engine.hpp"
+#include "duckdb/common/time_point.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
 
-#include <openssl/ssl.h>
-#include <openssl/x509.h>
-
-#include "quack_ssl_key_generator.hpp"
-
 #include "quack_client.hpp"
 #include "quack_secret.hpp"
 #include "quack_session_state.hpp"
+#include "quack_settings.hpp"
+#include "quack_storage.hpp"
 #include "quack_uri.hpp"
+
+#include <absl/cleanup/cleanup.h>
 
 namespace duckdb {
 
-static milliseconds HeartbeatInterval(idx_t heartbeat_timeout_seconds, RandomEngine &random) {
+milliseconds QuackHeartbeatInterval(idx_t heartbeat_timeout_seconds, RandomEngine &random) {
 	auto interval_ms = heartbeat_timeout_seconds * 1000 / 3;
 	return milliseconds(static_cast<int64_t>(interval_ms * random.NextRandom(0.8, 1.2)));
+}
+
+static optional_idx DeadlineIn(int64_t milliseconds) {
+	return optional_idx(NumericCast<idx_t>(TimePoint::Now() + TimePoint::FromNanos(milliseconds * 1000000)));
+}
+
+optional_idx QuackControlDeadline() {
+	static constexpr int64_t CONTROL_REQUEST_TIMEOUT_MS = 5000;
+	return DeadlineIn(CONTROL_REQUEST_TIMEOUT_MS);
+}
+
+optional_idx QuackStatementDeadline(ClientContext &context, optional_ptr<const QuackClientConnection> connection) {
+	if (context.query_deadline.IsValid() || !connection || !connection->SereneDBPeer()) {
+		return context.query_deadline;
+	}
+	auto timeout_ms =
+	    QuackGetUBigintSetting(context, "quack_default_statement_timeout", QUACK_DEFAULT_STATEMENT_TIMEOUT_MS_DEFAULT);
+	if (timeout_ms == 0) {
+		return optional_idx();
+	}
+	return DeadlineIn(NumericCast<int64_t>(timeout_ms));
 }
 
 template <class T>
@@ -54,14 +75,13 @@ static void LoadExtraHttpHeaders(optional_ptr<ClientContext> context, DatabaseIn
 	}
 }
 
-void QuackClientConnection::CancelQuery(hugeint_t query_uuid) {
-	lock_guard<mutex> guard(lock);
-	if (cached_clients.empty()) {
-		return;
-	}
-	// get a cached client, if any
-	auto &client = cached_clients.back();
-	client->Request<SuccessResponse>(nullptr, make_uniq<CancelRequestMessage>(connection_id, query_uuid));
+void QuackClientConnection::CancelQuery(hugeint_t query_uuid) const {
+	auto client = TakeClient(nullptr);
+	client->SetOwnerConnection(this);
+	client->Request<SuccessResponse>(nullptr, make_uniq<CancelRequestMessage>(connection_id, query_uuid),
+	                                 QuackControlDeadline());
+	client->SetOwnerConnection(nullptr);
+	StoreClient(std::move(client));
 }
 
 QuackClient::QuackClient(DatabaseInstance &db_p, const QuackUri &uri_p) : db(db_p), uri(uri_p) {
@@ -81,7 +101,8 @@ optional_idx QuackActiveClientQueryId(ClientContext &context) {
 	return optional_idx(raw_query_id);
 }
 
-void QuackClient::EncodeRequest(optional_ptr<ClientContext> context, QuackMessage &message, MemoryStream &out) {
+void QuackClient::EncodeRequest(optional_ptr<ClientContext> context, QuackMessage &message, MemoryStream &out,
+                                bool serenedb_peer) {
 	if (context) {
 		// Inject client_query_id from the active query so client and server logs correlate.
 		auto client_query_id = QuackActiveClientQueryId(*context);
@@ -89,7 +110,7 @@ void QuackClient::EncodeRequest(optional_ptr<ClientContext> context, QuackMessag
 			message.SetClientQueryId(client_query_id);
 		}
 	}
-	message.ToMemoryStream(out);
+	message.ToMemoryStream(out, serenedb_peer);
 }
 
 unique_ptr<QuackMessage> QuackClient::DecodeResponse(const string &response_body) {
@@ -122,16 +143,23 @@ HttpsQuackClient::HttpsQuackClient(DatabaseInstance &db, const QuackUri &uri_p) 
 HttpsQuackClient::~HttpsQuackClient() {
 }
 
-string HttpsQuackClient::PostRawLocked(const_data_ptr_t data, idx_t size) {
+string HttpsQuackClient::PostRawLocked(const_data_ptr_t data, idx_t size, optional_idx deadline, MessageType type) {
 	D_ASSERT(http_params);
+	// a request of a statement ends when the statement's time does, with the statement's timeout error
+	ClientContext::DeadlineCheck(deadline);
+	http_params->deadline = deadline;
 	auto &http_util = HTTPUtil::Get(db);
 	auto request_url = uri.Http() + "/quack";
 	HTTPHeaders headers = extra_headers;
+	if (type == MessageType::CONNECTION_REQUEST) {
+		headers.Insert(QUACK_SERENEDB_HEADER, "1");
+	}
 	PostRequestInfo post_request(request_url, headers, *http_params, data, size);
 	unique_ptr<HTTPResponse> response;
 	try {
 		response = http_util.Request(post_request, http_client);
 	} catch (std::exception &ex) {
+		ClientContext::DeadlineCheck(deadline);
 		ErrorData error(ex);
 		throw IOException("Failed to send message: %s", error.Message());
 	}
@@ -146,13 +174,17 @@ void HttpsQuackClient::EnsureHttpParams(optional_ptr<ClientContext> context) {
 	if (!http_params) {
 		auto &http_util = HTTPUtil::Get(db);
 		auto request_url = uri.Http() + "/quack";
+		// A commit's requests run after the context let go of its transaction, so they read the database's
+		// settings and secrets
+		optional_ptr<ClientContext> transaction_context;
 		if (context && context->transaction.HasActiveTransaction()) {
+			transaction_context = context;
 			http_params = http_util.InitializeParameters(*context, request_url);
 		} else {
 			http_params = http_util.InitializeParameters(db, request_url);
 		}
 		// Resolve EXTRA_HTTP_HEADERS from the quack secret once; reused for every request on this client.
-		LoadExtraHttpHeaders(context, db, uri, extra_headers);
+		LoadExtraHttpHeaders(transaction_context, db, uri, extra_headers);
 	}
 	http_params->timeout = HTTP_TIMEOUT_SECONDS;
 	http_params->retries = 0;
@@ -165,125 +197,27 @@ void HttpsQuackClient::EnsureHttpParams(optional_ptr<ClientContext> context) {
 	} else if (!context) {
 		http_params->logger.reset();
 	}
-	if (teardown_request) {
-		// The final DisconnectMessage is best-effort. The transport derives its timeout from
-		// http_params->timeout, which a caller may have set very high (e.g. an hour) for long-running
-		// task dispatch. Against a gone or half-open peer at teardown that would block the destructor for
-		// the whole timeout, so cap it hard and drop retries — a couple of seconds, then give up.
-		http_params->timeout = 2;
-		http_params->timeout_usec = 0;
-		http_params->retries = 0;
-	}
 }
 
-void HttpsQuackClient::PrepareTeardownRequest() {
-	teardown_request = true;
-}
-
-string HttpsQuackClient::PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size) {
+string HttpsQuackClient::PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size,
+                                 optional_idx deadline) {
 	lock_guard<mutex> guard(request_mutex);
 	EnsureHttpParams(context);
-	return PostRawLocked(data, size);
+	return PostRawLocked(data, size, deadline, MessageType::INVALID);
 }
 
 unique_ptr<QuackMessage> HttpsQuackClient::RequestInternal(optional_ptr<ClientContext> context,
-                                                           unique_ptr<QuackMessage> request_message) {
+                                                           unique_ptr<QuackMessage> request_message,
+                                                           optional_idx deadline) {
 	D_ASSERT(request_message);
 
 	lock_guard<mutex> guard(request_mutex);
 	EnsureHttpParams(context);
 
 	auto start_time = QuackNowMillis();
-	EncodeRequest(context, *request_message, write_stream);
-	auto response_body = PostRawLocked(write_stream.GetData(), write_stream.GetPosition());
-	auto response_message = DecodeResponse(response_body);
-	auto duration_ms = QuackNowMillis() - start_time;
-
-	string error;
-	if (response_message->Type() == MessageType::ERROR_RESPONSE) {
-		error = response_message->Cast<ErrorResponse>().ErrorMessage();
-	}
-	LogRequest(GetRequestLogger(context), request_message->Type(), request_message->ConnectionId(),
-	           request_message->ClientQueryId(), request_message->LoggableQuery(), duration_ms,
-	           response_message->Type(), error);
-
-	return response_message;
-}
-
-PinnedHttpsQuackClient::PinnedHttpsQuackClient(DatabaseInstance &db, const QuackUri &uri_p) : QuackClient(db, uri_p) {
-	D_ASSERT(uri.Ssl() && !uri.SslFingerprint().empty());
-	https_client = make_uniq<duckdb_httplib_openssl::Client>(uri.Http());
-	// The pin is the whole trust decision: accept exactly the certificate with this fingerprint, reject
-	// anything else. Accepting here also skips the CA and hostname checks, which a self-signed
-	// certificate cannot pass anyway.
-	auto expected_fingerprint = uri.SslFingerprint();
-	https_client->set_session_verifier([expected_fingerprint](duckdb_httplib_openssl::tls::session_t session)
-	                                       -> duckdb_httplib_openssl::SSLVerifierResponse {
-		auto ssl = static_cast<SSL *>(session);
-		auto cert = SSL_get1_peer_certificate(ssl);
-		if (!cert) {
-			return duckdb_httplib_openssl::SSLVerifierResponse::CertificateRejected;
-		}
-		auto fingerprint = QuackUri::NormalizeFingerprint(SslKeyGenerator::CertificateFingerprint(cert));
-		X509_free(cert);
-		return fingerprint == expected_fingerprint ? duckdb_httplib_openssl::SSLVerifierResponse::CertificateAccepted
-		                                           : duckdb_httplib_openssl::SSLVerifierResponse::CertificateRejected;
-	});
-	https_client->set_keep_alive(true);
-	https_client->set_tcp_nodelay(true);
-	// Same knob the httpfs transport honors, so a caller that raised http_timeout for long requests
-	// gets the same bound here (seconds).
-	Value timeout_val;
-	if (db.TryGetCurrentSetting("http_timeout", timeout_val) && !timeout_val.IsNull()) {
-		auto timeout_seconds = NumericCast<time_t>(timeout_val.GetValue<uint64_t>());
-		https_client->set_connection_timeout(timeout_seconds, 0);
-		https_client->set_read_timeout(timeout_seconds, 0);
-		https_client->set_write_timeout(timeout_seconds, 0);
-	}
-}
-
-PinnedHttpsQuackClient::~PinnedHttpsQuackClient() {
-}
-
-void PinnedHttpsQuackClient::PrepareTeardownRequest() {
-	// see HttpsQuackClient::EnsureHttpParams: the final DisconnectMessage must not hang on a dead peer
-	https_client->set_connection_timeout(2, 0);
-	https_client->set_read_timeout(2, 0);
-	https_client->set_write_timeout(2, 0);
-}
-
-string PinnedHttpsQuackClient::PostRawLocked(const_data_ptr_t data, idx_t size) {
-	auto result = https_client->Post("/quack", const_char_ptr_cast(data), size, "application/vnd.duckdb");
-	if (!result) {
-		auto error = result.error();
-		if (error == duckdb_httplib_openssl::Error::SSLServerVerification) {
-			throw IOException("Failed to send message: the certificate presented by %s does not match the pinned "
-			                  "ssl_fingerprint",
-			                  uri.Http());
-		}
-		throw IOException("Failed to send message: %s error for HTTP POST to '%s/quack'",
-		                  duckdb_httplib_openssl::to_string(error), uri.Http());
-	}
-	if (result->status != 200) {
-		throw IOException("Failed to send message: HTTP %d for HTTP POST to '%s/quack'", result->status, uri.Http());
-	}
-	return std::move(result->body);
-}
-
-string PinnedHttpsQuackClient::PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size) {
-	lock_guard<mutex> guard(request_mutex);
-	return PostRawLocked(data, size);
-}
-
-unique_ptr<QuackMessage> PinnedHttpsQuackClient::RequestInternal(optional_ptr<ClientContext> context,
-                                                                 unique_ptr<QuackMessage> request_message) {
-	D_ASSERT(request_message);
-
-	lock_guard<mutex> guard(request_mutex);
-
-	auto start_time = QuackNowMillis();
-	EncodeRequest(context, *request_message, write_stream);
-	auto response_body = PostRawLocked(write_stream.GetData(), write_stream.GetPosition());
+	EncodeRequest(context, *request_message, write_stream, owner_connection && owner_connection->SereneDBPeer());
+	auto response_body =
+	    PostRawLocked(write_stream.GetData(), write_stream.GetPosition(), deadline, request_message->Type());
 	auto response_message = DecodeResponse(response_body);
 	auto duration_ms = QuackNowMillis() - start_time;
 
@@ -299,10 +233,6 @@ unique_ptr<QuackMessage> PinnedHttpsQuackClient::RequestInternal(optional_ptr<Cl
 }
 
 unique_ptr<QuackClient> QuackClient::GetClient(DatabaseInstance &db, const QuackUri &uri) {
-	if (uri.Ssl() && !uri.SslFingerprint().empty()) {
-		// pinned: our own TLS client, nothing from httpfs is involved
-		return make_uniq<PinnedHttpsQuackClient>(db, uri);
-	}
 	ExtensionHelper::AutoLoadExtension(db, "httpfs");
 	if (!db.ExtensionIsLoaded("httpfs")) {
 		throw MissingExtensionException("The quack extension requires the httpfs extension to be loaded!");
@@ -316,39 +246,92 @@ unique_ptr<QuackClient> QuackClient::GetClient(ClientContext &context, const Qua
 }
 
 QuackClientConnection::QuackClientConnection(DatabaseInstance &db_p, unique_ptr<QuackClient> client_p, QuackUri uri_p,
-                                             string connection_id_p, idx_t heartbeat_timeout_seconds_p,
-                                             idx_t max_connections_cached_p)
-    : db(db_p), uri(std::move(uri_p)), connection_id(std::move(connection_id_p)),
-      heartbeat_timeout_seconds(heartbeat_timeout_seconds_p), max_connections_cached(max_connections_cached_p) {
+                                             string connection_id_p, idx_t quack_version_p, bool serenedb_peer_p,
+                                             idx_t heartbeat_timeout_seconds_p, idx_t max_connections_cached_p)
+    : db(db_p), uri(std::move(uri_p)), connection_id(std::move(connection_id_p)), quack_version(quack_version_p),
+      serenedb_peer(serenedb_peer_p), heartbeat_timeout_seconds(heartbeat_timeout_seconds_p),
+      max_connections_cached(max_connections_cached_p) {
 	if (client_p) {
 		StoreClient(std::move(client_p));
 	}
 }
 
+unique_ptr<PrepareRequestMessage> QuackClientConnection::MakePrepare(string sql, hugeint_t query_uuid) const {
+	statements_started++;
+	return make_uniq<PrepareRequestMessage>(connection_id, std::move(sql), query_uuid);
+}
+
+unique_ptr<PrepareResponseMessage> QuackClientConnection::Prepare(ClientContext &context,
+                                                                  unique_ptr<PrepareRequestMessage> prepare) const {
+	auto query_uuid = prepare->QueryUUID();
+	auto client_wrapper = GetClient(context);
+	absl::Cleanup cancel_on_failure = [&] {
+		CancelQueryInBackground(query_uuid);
+	};
+	auto response = client_wrapper->GetClient().Request<PrepareResponseMessage>(context, std::move(prepare));
+	std::move(cancel_on_failure).Cancel();
+	return response;
+}
+
 QuackClientConnection::~QuackClientConnection() {
+	Close();
+}
+
+void QuackClientConnection::Close() {
+	if (closed.exchange(true)) {
+		return;
+	}
 	heartbeat.Stop();
-	if (!cached_clients.empty()) {
-		try {
-			auto &client = cached_clients.back();
-			// A dead peer at teardown must not block the destructor for the full request timeout (which
-			// task dispatch may have set to an hour). Bound the transport first.
-			client->PrepareTeardownRequest();
-			client->Request<SuccessResponse>(nullptr, make_uniq<DisconnectMessage>(connection_id));
-		} catch (...) {
-		}
+	vector<unique_ptr<QuackClient>> clients;
+	{
+		lock_guard<mutex> guard(lock);
+		clients = std::move(cached_clients);
+		cached_clients.clear();
+	}
+	try {
+		shared_ptr<QuackClient> client(clients.empty() ? QuackClient::GetClient(db, uri) : std::move(clients.back()));
+		// the session ends at the latest once its lease runs out, so nobody waits for the answer
+		QuackStorageExtensionInfo::RunInBackground(db, [client, connection_id = connection_id] {
+			try {
+				client->Request<SuccessResponse>(nullptr, make_uniq<DisconnectMessage>(connection_id),
+				                                 QuackControlDeadline());
+			} catch (...) { // NOLINT: best effort
+			}
+		});
+	} catch (...) { // NOLINT: best effort, the server ends the session once its lease runs out
+	}
+}
+
+void QuackClientConnection::CancelQueryInBackground(hugeint_t query_uuid) const {
+	try {
+		QuackStorageExtensionInfo::RunInBackground(db, [connection = shared_from_this(), query_uuid] {
+			try {
+				connection->CancelQuery(query_uuid);
+			} catch (...) { // NOLINT: best effort, the server may already be gone
+			}
+		});
+	} catch (...) { // NOLINT: best effort, destructors call it
 	}
 }
 
 void QuackClientConnection::StartHeartbeat() {
 	auto random = make_shared_ptr<RandomEngine>();
-	heartbeat.Start([this, random] { return HeartbeatInterval(heartbeat_timeout_seconds, *random); },
-	                [this] { SendHeartbeat(); });
+	heartbeat.Start(
+	    QuackStorageExtensionInfo::GetState(db).scheduler,
+	    [this, random] { return QuackHeartbeatInterval(heartbeat_timeout_seconds, *random); },
+	    [this] { SendHeartbeat(); });
 }
 
 //! A failed attempt is not terminal: the worker swallows the throw and retries next interval.
-void QuackClientConnection::SendHeartbeat() {
+void QuackClientConnection::SendHeartbeat() const {
+	if (closed) {
+		return;
+	}
 	auto client = TakeClient(nullptr);
-	client->Request<SuccessResponse>(nullptr, make_uniq<HeartbeatRequestMessage>(connection_id));
+	client->SetOwnerConnection(this);
+	client->Request<SuccessResponse>(nullptr, make_uniq<HeartbeatRequestMessage>(connection_id),
+	                                 QuackControlDeadline());
+	client->SetOwnerConnection(nullptr);
 	StoreClient(std::move(client));
 }
 
@@ -401,6 +384,20 @@ idx_t QuackClient::ResolveHeartbeatTimeout(ClientContext &context, optional_ptr<
 	return timeout_seconds;
 }
 
+string QuackClient::ResolveToken(ClientContext &context, const QuackUri &uri, string token) {
+	if (token.empty()) {
+		// canonical form, so the scope match does not depend on how the endpoint was spelled
+		auto secret = QuackSecret::Find(context, nullptr, uri.CanonicalUri());
+		if (secret) {
+			token = QuackSecret::GetToken(*secret);
+		}
+	}
+	if (token.empty()) {
+		throw InvalidInputException("Could not find a Quack authentication token");
+	}
+	return token;
+}
+
 shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &context, const QuackUri &uri,
                                                                string token, string client_id,
                                                                idx_t heartbeat_timeout_seconds) {
@@ -408,27 +405,12 @@ shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &co
 	// rejected here regardless of where it came from.
 	ValidateClientId(client_id);
 	ValidateHeartbeatTimeout(heartbeat_timeout_seconds);
-	// whatever the caller did not supply comes from the secret manager: the token, and the pinned server
-	// certificate fingerprint
 	auto server_uri = uri;
-	if (token.empty() || server_uri.SslFingerprint().empty()) {
-		// canonical form, so the scope match does not depend on how the endpoint was spelled
-		auto secret = QuackSecret::Find(context, nullptr, uri.CanonicalUri());
-		if (secret) {
-			if (token.empty()) {
-				token = QuackSecret::GetToken(*secret);
-			}
-			string secret_fingerprint;
-			if (server_uri.SslFingerprint().empty() && QuackSecret::TryGetSslFingerprint(*secret, secret_fingerprint)) {
-				// a pin only makes sense over TLS, so it turns HTTPS on
-				server_uri.SetSslFingerprint(secret_fingerprint);
-				server_uri.SetSsl(true);
-			}
-		}
+	if (QuackStorageExtensionInfo::GetState(*context.db).Serves(server_uri.Host(), server_uri.Port())) {
+		throw InvalidInputException("%s is a Quack listener of this server, which cannot connect to itself",
+		                            server_uri.Uri());
 	}
-	if (token.empty()) {
-		throw InvalidInputException("Could not find a Quack authentication token");
-	}
+	token = ResolveToken(context, uri, std::move(token));
 
 	// open a HTTP client to the server
 	auto client = QuackClient::GetClient(context, server_uri);
@@ -436,10 +418,11 @@ shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &co
 	// submit the connection request
 	auto connection_request_response = client->Request<ConnectionResponseMessage>(
 	    context, make_uniq<ConnectionRequestMessage>(token, std::move(client_id), heartbeat_timeout_seconds));
-	// Validate the server's selected protocol version before trusting the connection (client speaks QUACK_VERSION).
-	if (connection_request_response->QuackVersion() != QUACK_VERSION) {
-		throw IOException("Incompatible Quack protocol version: server uses %llu, client supports %llu",
-		                  connection_request_response->QuackVersion(), QUACK_VERSION);
+	// Validate the server's selected protocol version before trusting the connection.
+	auto quack_version = connection_request_response->QuackVersion();
+	if (quack_version < QUACK_MIN_VERSION || quack_version > QUACK_VERSION) {
+		throw IOException("Incompatible Quack protocol version: server uses %llu, client supports %llu to %llu",
+		                  quack_version, QUACK_MIN_VERSION, QUACK_VERSION);
 	}
 	auto accepted_heartbeat_timeout_seconds = connection_request_response->HeartbeatTimeoutSeconds();
 	ValidateHeartbeatTimeout(accepted_heartbeat_timeout_seconds);
@@ -448,11 +431,9 @@ shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &co
 	// Cache at most one client per async send slot: pending SEND_DATA tasks can check out far more
 	// clients than ever POST concurrently, and each cached client pins a server connection slot.
 	idx_t pool_size = MaxValue<idx_t>(1, (idx_t)TaskScheduler::GetScheduler(context).NumberOfAsyncThreads());
-	auto connection =
-	    make_shared_ptr<QuackClientConnection>(*context.db, std::move(client), server_uri, std::move(connection_id),
-	                                           accepted_heartbeat_timeout_seconds, pool_size);
-	connection->StartHeartbeat();
-	return connection;
+	return make_shared_ptr<QuackClientConnection>(*context.db, std::move(client), server_uri, std::move(connection_id),
+	                                              quack_version, connection_request_response->SereneDB(),
+	                                              accepted_heartbeat_timeout_seconds, pool_size);
 }
 
 unique_ptr<QuackClient> QuackClientConnection::TakeClient(optional_ptr<ClientContext> context) const {
@@ -472,6 +453,10 @@ unique_ptr<QuackClient> QuackClientConnection::TakeClient(optional_ptr<ClientCon
 }
 
 unique_ptr<QuackClientWrapper> QuackClientConnection::GetClient(ClientContext &context) const {
+	if (closed) {
+		throw InvalidInputException("The session with the Quack server at %s is closed: its database was detached",
+		                            uri.Uri());
+	}
 	if (server_invalidated) {
 		throw InvalidInputException(
 		    "The Quack server at %s invalidated its database, so this attached database is gone with it. The "
@@ -492,8 +477,14 @@ unique_ptr<QuackClientWrapper> QuackClientConnection::GetClient(ClientContext &c
 }
 
 void QuackClient::NoteError(const ErrorResponse &error_response) {
-	if (error_response.MustInvalidate() && owner_connection) {
+	if (!owner_connection) {
+		return;
+	}
+	if (error_response.MustInvalidate()) {
 		owner_connection->MarkServerInvalidated();
+	}
+	if (error_response.Error().RawMessage() == QUACK_INVALID_CONNECTION_ID) {
+		owner_connection->MarkLost();
 	}
 }
 

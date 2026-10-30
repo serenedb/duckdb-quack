@@ -47,7 +47,7 @@ private:
 		auto start_time = QuackNowMillis();
 		// context=nullptr: called off the execution thread, must not touch ClientContext.
 		// The payload names its batch index, so an HTTP retry asks for the SAME batch again.
-		auto response_body = client.PostRaw(nullptr, payload->GetData(), payload_size);
+		auto response_body = client.PostRaw(nullptr, payload->GetData(), payload_size, fetcher.deadline);
 		auto duration_ms = QuackNowMillis() - start_time;
 
 		auto response = QuackClient::DecodeResponse(response_body);
@@ -119,7 +119,7 @@ idx_t QuackFetcher::GetReadAheadDepth(ClientContext &context) {
 		depth = val.GetValue<uint64_t>();
 	}
 	if (depth == 0) {
-		depth = MaxValue<idx_t>(1, (idx_t)TaskScheduler::GetScheduler(context).NumberOfAsyncThreads());
+		depth = MaxValue<idx_t>(1, TaskScheduler::QueryAsyncThreads(context));
 	}
 	return depth;
 }
@@ -140,10 +140,12 @@ QuackFetcher::QuackFetcher(ClientContext &context, QuackClientConnection &connec
 	buffer = make_shared_ptr<QuackFetchBuffer>();
 
 	this->query_uuid = query_uuid;
+	this->connection = connection.shared_from_this();
 	connection_id = connection.ConnectionId();
 	logger = context.logger;
 	// Read once: the async tasks read it together, and it belongs to this query.
 	client_query_id = QuackActiveClientQueryId(context);
+	deadline = QuackStatementDeadline(context, &connection);
 
 	for (idx_t i = 0; i < depth; i++) {
 		idle_clients.push_back(connection.GetClient(context));
@@ -199,7 +201,9 @@ QuackFetchResult QuackFetcher::GetBatch(ClientContext &context, TableFunctionInp
 void QuackFetcher::TopUp(ClientContext &context) {
 	while (!stop && !no_more_fetches) {
 		auto current = outstanding.load();
-		if (current >= depth) {
+		// A statement can run long before its first row, and each FETCH in flight holds a thread for that
+		// long: ask for one batch until the rows start to come.
+		if (current >= (received_any ? depth : 1)) {
 			break;
 		}
 		if (!outstanding.compare_exchange_weak(current, current + 1)) {
@@ -222,7 +226,7 @@ void QuackFetcher::TopUp(ClientContext &context) {
 		auto request_index = next_request++;
 		FetchRequestMessage fetch_msg(connection_id, query_uuid, request_index, CurrentAck());
 		auto request_payload = make_uniq<MemoryStream>();
-		QuackClient::EncodeRequest(context, fetch_msg, *request_payload);
+		QuackClient::EncodeRequest(context, fetch_msg, *request_payload, connection->SereneDBPeer());
 		auto request_size = request_payload->GetPosition();
 		queue->Register(make_uniq<QuackFetchDataTask>(*this, std::move(client), request_index,
 		                                              std::move(request_payload), request_size),
@@ -238,6 +242,7 @@ void QuackFetcher::BatchConsumed(ClientContext &context) {
 void QuackFetcher::RecordReceived(idx_t index) {
 	lock_guard<mutex> guard(ack_lock);
 	acked.Insert(index);
+	received_any = true;
 }
 
 idx_t QuackFetcher::CurrentAck() {
@@ -268,6 +273,15 @@ void QuackFetcher::FinishTask(unique_ptr<QuackClientWrapper> client, bool pushed
 
 void QuackFetcher::StopAndDrain() {
 	stop = true;
+	if (queue && !no_more_fetches) {
+		// The scan stops before the end of the stream (a LIMIT, an error, a cancel, a timeout), so the statement
+		// on the server goes on for nobody. The cancel ends it, and a FETCH in flight with it.
+		try {
+			connection->CancelQuery(query_uuid);
+		} catch (...) {
+			// the server may already be gone; the drain reports nothing either way
+		}
+	}
 	if (queue) {
 		try {
 			queue->Close();

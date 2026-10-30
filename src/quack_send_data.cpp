@@ -12,6 +12,8 @@
 #include "storage/quack_catalog.hpp"
 #include "storage/quack_table.hpp"
 
+#include <absl/cleanup/cleanup.h>
+
 namespace duckdb {
 
 //===--------------------------------------------------------------------===//
@@ -22,10 +24,10 @@ class QuackSendDataTask : public AsyncTask {
 public:
 	QuackSendDataTask(unique_ptr<QuackClientWrapper> client_wrapper_p, unique_ptr<MemoryStream> payload_p,
 	                  idx_t body_start_p, idx_t body_size_p, string connection_id_p, optional_idx client_query_id_p,
-	                  shared_ptr<Logger> logger_p, idx_t debug_delay_ms_p)
+	                  shared_ptr<Logger> logger_p, idx_t debug_delay_ms_p, optional_idx deadline_p)
 	    : client_wrapper(std::move(client_wrapper_p)), payload(std::move(payload_p)), body_start(body_start_p),
 	      body_size(body_size_p), connection_id(std::move(connection_id_p)), client_query_id(client_query_id_p),
-	      logger(std::move(logger_p)), debug_delay_ms(debug_delay_ms_p) {
+	      logger(std::move(logger_p)), debug_delay_ms(debug_delay_ms_p), deadline(deadline_p) {
 	}
 
 	void Execute() override {
@@ -38,7 +40,7 @@ public:
 		auto start_time = QuackNowMillis();
 		// context=nullptr: this thread must not touch ClientContext.
 		// The payload holds its batch index, so a retry sends the same batch again.
-		auto response_body = client.PostRaw(nullptr, payload->GetData() + body_start, body_size);
+		auto response_body = client.PostRaw(nullptr, payload->GetData() + body_start, body_size, deadline);
 		auto duration_ms = QuackNowMillis() - start_time;
 
 		auto response = QuackClient::DecodeResponse(response_body);
@@ -71,6 +73,8 @@ private:
 	optional_idx client_query_id;
 	shared_ptr<Logger> logger;
 	idx_t debug_delay_ms;
+	//! The statement's ClientContext::query_deadline
+	optional_idx deadline;
 };
 
 //===--------------------------------------------------------------------===//
@@ -90,18 +94,16 @@ struct QuackPreparedSendData : public QuackPreparedBatch {
 //! The buffer is the wire body, so a cut needs no second serialization.
 class QuackSendDataFragmentBuilder : public QuackFragmentBuilder {
 public:
-	QuackSendDataFragmentBuilder(ClientContext &context, QuackTableCatalogEntry &table, const string &stream_id_p,
-	                             idx_t size_hint)
-	    : stream_id(stream_id_p) {
-		auto &quack_catalog = table.catalog.Cast<QuackCatalog>();
-		connection_id = quack_catalog.GetConnectionId();
+	QuackSendDataFragmentBuilder(ClientContext &context, const string &connection_id_p, const string &stream_id_p,
+	                             idx_t size_hint, bool serenedb_peer)
+	    : connection_id(connection_id_p), stream_id(stream_id_p) {
 		// Fail before the first batch when the ids cannot fit. 64 covers the fixed fields at max width.
 		if (64 + connection_id.size() + stream_id.size() > QUACK_PAYLOAD_HEADER_BYTES) {
 			throw InternalException("SEND_DATA header does not fit its reserved space");
 		}
 		// The same client_query_id that QuackClient::EncodeRequest adds, taken while a context exists.
 		client_query_id = QuackActiveClientQueryId(context);
-		writer = make_uniq<QuackChunkPayloadWriter>(size_hint);
+		writer = make_uniq<QuackChunkPayloadWriter>(size_hint, serenedb_peer);
 	}
 
 	void Append(ClientContext &context, DataChunk &chunk) override {
@@ -147,7 +149,7 @@ public:
 	QuackSendDataEmitter(ClientContext &context, QuackTableCatalogEntry &table_p, string stream_id_p,
 	                     hugeint_t query_uuid_p, idx_t debug_delay_ms_p, bool debug_duplicate_sends_p,
 	                     idx_t debug_drop_batch_p)
-	    : context(context.shared_from_this()), table(table_p), stream_id(std::move(stream_id_p)),
+	    : session(table_p.catalog.Cast<QuackCatalog>().GetClientConnection(context)), stream_id(std::move(stream_id_p)),
 	      query_uuid(query_uuid_p), debug_delay_ms(debug_delay_ms_p), debug_duplicate_sends(debug_duplicate_sends_p),
 	      debug_drop_batch(debug_drop_batch_p) {
 		queue = make_uniq<ManagedAsyncTaskQueue>(context);
@@ -163,19 +165,12 @@ public:
 			queue->Close();
 		} catch (...) { // NOLINT: a destructor must not throw
 		}
-		try {
-			if (auto live = context.lock()) {
-				auto &quack_catalog = table.catalog.Cast<QuackCatalog>();
-				auto client_wrapper = quack_catalog.GetClientConnection()->GetClient(*live);
-				auto cancel = make_uniq<CancelRequestMessage>(quack_catalog.GetConnectionId(), query_uuid);
-				client_wrapper->GetClient().Request<SuccessResponse>(*live, std::move(cancel));
-			}
-		} catch (...) { // NOLINT: best effort
-		}
+		session->CancelQueryInBackground(query_uuid);
 	}
 
 	unique_ptr<QuackFragmentBuilder> OpenFragment(ClientContext &context, idx_t size_hint) override {
-		return make_uniq<QuackSendDataFragmentBuilder>(context, table, stream_id, size_hint);
+		return make_uniq<QuackSendDataFragmentBuilder>(context, session->ConnectionId(), stream_id, size_hint,
+		                                               session->SereneDBPeer());
 	}
 
 	//! Always true: the queue does not refuse work. ApplyBackpressure holds the producer thread.
@@ -187,7 +182,7 @@ public:
 		header_message.SetChunkCount(prepared->chunk_count);
 		header_message.SetBatchIndex(dense_index);
 		header_message.SetClientQueryId(prepared->client_query_id);
-		auto body_start = QuackPrependHeader(*prepared->payload, header_message);
+		auto body_start = QuackPrependHeader(*prepared->payload, header_message, session->SereneDBPeer());
 		auto body_size = prepared->payload_size - body_start;
 
 		// DEBUG SETTING: lose one batch on purpose. The terminal message announces the full count, so
@@ -195,8 +190,6 @@ public:
 		if (debug_drop_batch == dense_index) {
 			return true;
 		}
-
-		auto &quack_catalog = table.catalog.Cast<QuackCatalog>();
 
 		// DEBUG SETTING: send the same batch again, to imitate a retry. The receiver must drop it.
 		unique_ptr<MemoryStream> duplicate;
@@ -207,16 +200,17 @@ public:
 
 		auto connection_id = prepared->connection_id;
 		auto client_query_id = prepared->client_query_id;
-		auto client_wrapper = quack_catalog.GetClientConnection()->GetClient(context);
+		auto deadline = QuackStatementDeadline(context, session.get());
+		auto client_wrapper = session->GetClient(context);
 		queue->Register(make_uniq<QuackSendDataTask>(std::move(client_wrapper), std::move(prepared->payload),
 		                                             body_start, body_size, connection_id, client_query_id,
-		                                             context.logger, debug_delay_ms),
+		                                             context.logger, debug_delay_ms, deadline),
 		                body_size);
 		if (duplicate) {
-			auto retry_wrapper = quack_catalog.GetClientConnection()->GetClient(context);
+			auto retry_wrapper = session->GetClient(context);
 			queue->Register(make_uniq<QuackSendDataTask>(std::move(retry_wrapper), std::move(duplicate), 0, body_size,
 			                                             std::move(connection_id), client_query_id, context.logger,
-			                                             debug_delay_ms),
+			                                             debug_delay_ms, deadline),
 			                body_size);
 		}
 		queue->ApplyBackpressure();
@@ -227,21 +221,25 @@ public:
 		// Drain every send first. The buffer checks the count when the terminal message arrives.
 		queue->Close();
 		queue.reset();
+		// A request that fails, such as at the statement's deadline, leaves the statement waiting on the server
+		absl::Cleanup cancel_on_failure = [&] {
+			session->CancelQueryInBackground(query_uuid);
+		};
 
-		auto &quack_catalog = table.catalog.Cast<QuackCatalog>();
-		auto client_wrapper = quack_catalog.GetClientConnection()->GetClient(context);
+		auto client_wrapper = session->GetClient(context);
 		auto &client = client_wrapper->GetClient();
 
 		// The terminal message is an ordinary SEND_DATA with no chunks. It closes the stream against the
 		// batch count, so a lost batch fails the statement.
-		auto terminal = make_uniq<SendDataRequestMessage>(quack_catalog.GetConnectionId(), stream_id);
+		auto terminal = make_uniq<SendDataRequestMessage>(session->ConnectionId(), stream_id);
 		terminal->SetTotalBatches(total_batches);
 		client.Request<SendDataResponseMessage>(context, std::move(terminal));
 
 		// The statement's result is one row: the rows it changed. Fetch it like any result, so a
 		// failure after the last batch surfaces here too.
-		auto fetch = make_uniq<FetchRequestMessage>(quack_catalog.GetConnectionId(), query_uuid, 1, 1);
+		auto fetch = make_uniq<FetchRequestMessage>(session->ConnectionId(), query_uuid, 1, 1);
 		auto response = client.Request<FetchResponseMessage>(context, std::move(fetch));
+		std::move(cancel_on_failure).Cancel();
 		for (auto &chunk : response->MutableResults()) {
 			if (chunk->size() > 0 && chunk->ColumnCount() > 0) {
 				return optional_idx(NumericCast<idx_t>(chunk->GetValue(0, 0).GetValue<int64_t>()));
@@ -251,8 +249,8 @@ public:
 	}
 
 private:
-	weak_ptr<ClientContext> context;
-	QuackTableCatalogEntry &table;
+	//! The server session the INSERT statement runs on
+	shared_ptr<QuackClientConnection> session;
 	string stream_id;
 	hugeint_t query_uuid;
 	idx_t debug_delay_ms;

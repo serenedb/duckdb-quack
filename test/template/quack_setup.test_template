@@ -10,9 +10,17 @@ test-env QUACK_SERVER quack:localhost
 set ignore_error_messages
 
 statement ok quack_db:quack_server_con
-set variable actual_listen_uri = (select listen_uri from quack_serve('{QUACK_SERVER}:0', token='asdf'));
-
-query I quack_db:quack_server_con
-set variable listen_uri = concat('''', getvariable('actual_listen_uri'), '''');
+set variable listen_uri = '''{QUACK_SERVER}''';
 
 set variable server <variable:quack_server_con:listen_uri>
+
+statement ok quack_db:quack_server_con
+attach {server} as quack_server (token 'asdf');
+
+statement ok quack_db:quack_server_con
+set variable harness_connection = quack_connection_id('quack_server');
+
+set variable harness <variable:quack_server_con:harness_connection>
+
+statement ok quack_db:quack_server_con
+connect quack_server;
