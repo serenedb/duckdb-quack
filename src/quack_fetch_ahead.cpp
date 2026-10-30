@@ -119,7 +119,7 @@ idx_t QuackFetcher::GetReadAheadDepth(ClientContext &context) {
 		depth = val.GetValue<uint64_t>();
 	}
 	if (depth == 0) {
-		depth = MaxValue<idx_t>(1, (idx_t)TaskScheduler::GetScheduler(context).NumberOfAsyncThreads());
+		depth = MaxValue<idx_t>(1, TaskScheduler::QueryAsyncThreads(context));
 	}
 	return depth;
 }
