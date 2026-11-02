@@ -44,11 +44,12 @@ QuackTableSet::QuackTableSet(ClientContext &context, QuackSchemaCatalogEntry &pa
 				throw InternalException("Expected a CREATE TABLE");
 			}
 			auto remote_name = parent.GetRemoteName(info->GetQualifiedName().Name()).ToString();
-			// The server enforces foreign keys, and binding them would look up tables in the unregistered catalog
+			// The server enforces foreign keys and CHECKs, and binding them would look up names in the unregistered
+			// catalog
 			auto &table_info = info->Cast<CreateTableInfo>();
 			vector<unique_ptr<Constraint>> constraints;
 			for (auto &constraint : table_info.constraints) {
-				if (constraint->type != ConstraintType::FOREIGN_KEY) {
+				if (constraint->type != ConstraintType::FOREIGN_KEY && constraint->type != ConstraintType::CHECK) {
 					constraints.push_back(std::move(constraint));
 				}
 			}
