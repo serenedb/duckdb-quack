@@ -33,8 +33,10 @@ optional_idx QuackStatementDeadline(ClientContext &context, optional_ptr<const Q
 
 class QuackClient {
 public:
+	static constexpr uint64_t HTTP_TIMEOUT_SECONDS = 86400;
+
 	explicit QuackClient(DatabaseInstance &db_p, const QuackUri &uri_p);
-	virtual ~QuackClient();
+	~QuackClient();
 
 	template <class TARGET>
 	unique_ptr<TARGET> Request(optional_ptr<ClientContext> context, unique_ptr<QuackMessage> request_message) {
@@ -73,8 +75,7 @@ public:
 	//! pass context=nullptr when called off the execution thread (parameters fall back to the database).
 	//! A request still running at `deadline`, the statement's ClientContext::query_deadline, fails with the
 	//! statement's timeout error.
-	virtual string PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size,
-	                       optional_idx deadline) = 0;
+	string PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size, optional_idx deadline);
 
 	//! Encode a request (inject client_query_id when a query is active, then serialize) into `out`.
 	//! Protocol-level and lock-free; the caller owns `out` and any locking around it.
@@ -113,9 +114,15 @@ public:
 	//! Heartbeat leases must have a positive timeout.
 	static void ValidateHeartbeatTimeout(idx_t heartbeat_timeout_seconds);
 
-protected:
+private:
 	//! Resolve the logger for a request: the context (per-query) logger when available, else the db logger.
 	Logger &GetRequestLogger(optional_ptr<ClientContext> context);
+	unique_ptr<QuackMessage> RequestInternal(optional_ptr<ClientContext> context,
+	                                         unique_ptr<QuackMessage> request_message, optional_idx deadline);
+	//! POST bytes assuming request_mutex is already held. A CONNECTION_REQUEST carries QUACK_SERENEDB_HEADER.
+	string PostRawLocked(const_data_ptr_t data, idx_t size, optional_idx deadline, MessageType type);
+	//! Lazily initialise http_params (context-aware) and attach request_logger; assumes request_mutex is held.
+	void EnsureHttpParams(optional_ptr<ClientContext> context);
 
 	mutex request_mutex;
 	MemoryStream write_stream;
@@ -125,11 +132,13 @@ protected:
 	shared_ptr<Logger> request_logger;
 	//! See SetOwnerConnection
 	optional_ptr<const QuackClientConnection> owner_connection;
-
-private:
-	virtual unique_ptr<QuackMessage> RequestInternal(optional_ptr<ClientContext> context,
-	                                                 unique_ptr<QuackMessage> request_message,
-	                                                 optional_idx deadline) = 0;
+	unique_ptr<HTTPParams> http_params;
+	//! Extra HTTP headers resolved once from the `quack` secret (EXTRA_HTTP_HEADERS),
+	//! injected into every request. Loaded lazily alongside http_params.
+	HTTPHeaders extra_headers;
+	//! Persistent keep-alive HTTP client: reused across requests so the TCP connection (and its
+	//! warm congestion window) survives between POSTs; replaced by the retry path on dead sockets.
+	unique_ptr<HTTPClient> http_client;
 };
 
 class QuackClientConnection : public enable_shared_from_this<QuackClientConnection> {
@@ -237,34 +246,6 @@ struct QuackClientWrapper {
 private:
 	unique_ptr<QuackClient> client;
 	shared_ptr<const QuackClientConnection> client_connection;
-};
-
-class HttpsQuackClient : public QuackClient {
-public:
-	static constexpr uint64_t HTTP_TIMEOUT_SECONDS = 86400;
-
-	HttpsQuackClient(DatabaseInstance &db, const QuackUri &uri_p);
-	~HttpsQuackClient() override;
-
-	string PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size,
-	               optional_idx deadline) override;
-
-private:
-	unique_ptr<QuackMessage> RequestInternal(optional_ptr<ClientContext> context,
-	                                         unique_ptr<QuackMessage> request_message, optional_idx deadline) override;
-	//! POST bytes assuming request_mutex is already held. A CONNECTION_REQUEST carries QUACK_SERENEDB_HEADER.
-	string PostRawLocked(const_data_ptr_t data, idx_t size, optional_idx deadline, MessageType type);
-	//! Lazily initialise http_params (context-aware) and attach request_logger; assumes request_mutex is held.
-	void EnsureHttpParams(optional_ptr<ClientContext> context);
-
-private:
-	unique_ptr<HTTPParams> http_params;
-	//! Extra HTTP headers resolved once from the `quack` secret (EXTRA_HTTP_HEADERS),
-	//! injected into every request. Loaded lazily alongside http_params.
-	HTTPHeaders extra_headers;
-	//! Persistent keep-alive HTTP client: reused across requests so the TCP connection (and its
-	//! warm congestion window) survives between POSTs; replaced by the retry path on dead sockets.
-	unique_ptr<HTTPClient> http_client;
 };
 
 } // namespace duckdb

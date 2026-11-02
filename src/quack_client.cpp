@@ -138,12 +138,7 @@ void QuackClient::LogRequest(Logger &logger, MessageType request_type, const str
 	logger.WriteLog(QuackLogType::NAME, QuackLogType::LEVEL, msg);
 }
 
-HttpsQuackClient::HttpsQuackClient(DatabaseInstance &db, const QuackUri &uri_p) : QuackClient(db, uri_p) {};
-
-HttpsQuackClient::~HttpsQuackClient() {
-}
-
-string HttpsQuackClient::PostRawLocked(const_data_ptr_t data, idx_t size, optional_idx deadline, MessageType type) {
+string QuackClient::PostRawLocked(const_data_ptr_t data, idx_t size, optional_idx deadline, MessageType type) {
 	D_ASSERT(http_params);
 	http_params->deadline = deadline;
 	auto &http_util = HTTPUtil::Get(db);
@@ -169,7 +164,7 @@ string HttpsQuackClient::PostRawLocked(const_data_ptr_t data, idx_t size, option
 	return std::move(post_request.buffer_out);
 }
 
-void HttpsQuackClient::EnsureHttpParams(optional_ptr<ClientContext> context) {
+void QuackClient::EnsureHttpParams(optional_ptr<ClientContext> context) {
 	if (!http_params) {
 		auto &http_util = HTTPUtil::Get(db);
 		auto request_url = uri.Http() + "/quack";
@@ -198,16 +193,15 @@ void HttpsQuackClient::EnsureHttpParams(optional_ptr<ClientContext> context) {
 	}
 }
 
-string HttpsQuackClient::PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size,
-                                 optional_idx deadline) {
+string QuackClient::PostRaw(optional_ptr<ClientContext> context, const_data_ptr_t data, idx_t size,
+                            optional_idx deadline) {
 	lock_guard<mutex> guard(request_mutex);
 	EnsureHttpParams(context);
 	return PostRawLocked(data, size, deadline, MessageType::INVALID);
 }
 
-unique_ptr<QuackMessage> HttpsQuackClient::RequestInternal(optional_ptr<ClientContext> context,
-                                                           unique_ptr<QuackMessage> request_message,
-                                                           optional_idx deadline) {
+unique_ptr<QuackMessage> QuackClient::RequestInternal(optional_ptr<ClientContext> context,
+                                                      unique_ptr<QuackMessage> request_message, optional_idx deadline) {
 	D_ASSERT(request_message);
 
 	lock_guard<mutex> guard(request_mutex);
@@ -237,7 +231,7 @@ unique_ptr<QuackClient> QuackClient::GetClient(DatabaseInstance &db, const Quack
 		throw MissingExtensionException("The quack extension requires the httpfs extension to be loaded!");
 	}
 
-	return make_uniq<HttpsQuackClient>(db, uri);
+	return make_uniq<QuackClient>(db, uri);
 }
 
 unique_ptr<QuackClient> QuackClient::GetClient(ClientContext &context, const QuackUri &uri) {
