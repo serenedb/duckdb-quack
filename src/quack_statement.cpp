@@ -25,46 +25,50 @@ QuackRunState QuackStatementRunner::Step(const std::function<void()> &on_resched
 	if (finished) {
 		return QuackRunState::FINISHED;
 	}
+	if (!running) {
+		return SubmitNext();
+	}
+	if (stream->buffer.HasError()) {
+		// an abort that came before the statement started was cleared by its start
+		context.Interrupt();
+	}
+	QueryResultState state;
 	try {
-		if (!running) {
-			return SubmitNext();
-		}
-		if (stream->buffer.HasError()) {
-			// an abort that came before the statement started was cleared by its start
-			context.Interrupt();
-		}
-		switch (running->ExecuteTask(on_reschedule)) {
-		case QueryResultState::NOT_READY:
-			return QuackRunState::NOT_READY;
-		case QueryResultState::BLOCKED:
-		case QueryResultState::NO_TASKS_AVAILABLE:
-			return QuackRunState::BLOCKED;
-		case QueryResultState::READY:
-		case QueryResultState::FINISHED:
-		case QueryResultState::EXECUTION_ERROR:
-			break;
-		}
-		if (running->HasError()) {
-			Fail(running->GetErrorObject());
-			return QuackRunState::FINISHED;
-		}
-		// A statement the fetch collector claimed leaves its rows in the stream, any other one keeps them
-		auto result = running->TakeCollectorResult();
+		state = running->ExecuteTask(on_reschedule);
+	} catch (std::exception &ex) {
+		return Fail(ErrorData(ex));
+	}
+	switch (state) {
+	case QueryResultState::NOT_READY:
+		return QuackRunState::NOT_READY;
+	case QueryResultState::BLOCKED:
+	case QueryResultState::NO_TASKS_AVAILABLE:
+		return QuackRunState::BLOCKED;
+	case QueryResultState::READY:
+	case QueryResultState::FINISHED:
+	case QueryResultState::EXECUTION_ERROR:
+		break;
+	}
+	if (running->HasError()) {
+		return Fail(running->GetErrorObject());
+	}
+	// A statement the fetch collector claimed leaves its rows in the stream, any other one keeps them
+	unique_ptr<QueryResult> result;
+	try {
+		result = running->TakeCollectorResult();
 		if (!result) {
 			running->Complete();
 			result = std::move(running);
 		}
-		running.reset();
-		if (result->HasError()) {
-			Fail(result->GetErrorObject());
-			return QuackRunState::FINISHED;
-		}
-		last_result = std::move(result);
-		return QuackRunState::NOT_READY;
 	} catch (std::exception &ex) {
-		Fail(ErrorData(ex));
-		return QuackRunState::FINISHED;
+		return Fail(ErrorData(ex));
 	}
+	running.reset();
+	if (result->HasError()) {
+		return Fail(result->GetErrorObject());
+	}
+	last_result = std::move(result);
+	return QuackRunState::NOT_READY;
 }
 
 QuackRunState QuackStatementRunner::SubmitNext() {
@@ -78,17 +82,25 @@ QuackRunState QuackStatementRunner::SubmitNext() {
 	if (auto session_state = QuackSessionState::Get(context)) {
 		session_state->SetStatement(stream);
 	}
-	Parse();
-	if (describe_only) {
-		describe_only = false;
-		if (Describe()) {
-			finished = true;
-			return QuackRunState::FINISHED;
+	try {
+		Parse();
+		if (describe_only) {
+			describe_only = false;
+			if (Describe()) {
+				finished = true;
+				return QuackRunState::FINISHED;
+			}
 		}
+	} catch (std::exception &ex) {
+		return Fail(ErrorData(ex));
 	}
 	if (next_statement == statements.size()) {
 		if (!stream->Bound()) {
-			SendLastResult();
+			try {
+				SendLastResult();
+			} catch (std::exception &ex) {
+				return Fail(ErrorData(ex));
+			}
 		}
 		// Close against the announced total, so a short stream errors instead of truncating.
 		stream->buffer.Finish(stream->announced_total);
@@ -105,16 +117,10 @@ QuackRunState QuackStatementRunner::SubmitNext() {
 	QueryParameters parameters;
 	parameters.result_eagerness = ResultEagerness::FORCED;
 	parameters.caller_drives = true;
-	try {
-		running = context.Submit(std::move(statement), parameters);
-	} catch (...) {
-		config.get_result_collector = nullptr;
-		throw;
-	}
+	running = context.Submit(std::move(statement), parameters);
 	config.get_result_collector = nullptr;
 	if (running->HasError()) {
-		Fail(running->GetErrorObject());
-		return QuackRunState::FINISHED;
+		return Fail(running->GetErrorObject());
 	}
 	return QuackRunState::NOT_READY;
 }
@@ -192,7 +198,7 @@ void QuackStatementRunner::SendLastResult() {
 	stream->announced_total = 1;
 }
 
-void QuackStatementRunner::Fail(ErrorData error) {
+QuackRunState QuackStatementRunner::Fail(ErrorData error) {
 	finished = true;
 	running.reset();
 	stream->buffer.SetError(error);
@@ -200,6 +206,7 @@ void QuackStatementRunner::Fail(ErrorData error) {
 	if (auto session_state = QuackSessionState::Get(context)) {
 		session_state->Streams().Fail(error);
 	}
+	return QuackRunState::FINISHED;
 }
 
 } // namespace duckdb

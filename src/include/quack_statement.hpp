@@ -54,7 +54,8 @@ private:
 	bool Describe();
 	//! The statements returned no rows: the last one's Success/Count result becomes batch 1
 	void SendLastResult();
-	void Fail(ErrorData error);
+	//! `error` is a copy: it may come from the result that Fail drops
+	QuackRunState Fail(ErrorData error);
 
 	ClientContext &context;
 	shared_ptr<QuackResultStream> stream;

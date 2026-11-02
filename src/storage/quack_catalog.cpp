@@ -43,6 +43,7 @@ public:
 		auto entry = sessions.find(attach_id);
 		return entry == sessions.end() ? nullptr : entry->second;
 	}
+
 	void Add(const string &attach_id, shared_ptr<QuackClientConnection> session) {
 		lock_guard<mutex> guard(lock);
 		// the sessions of detached databases
@@ -55,6 +56,7 @@ public:
 		}
 		sessions[attach_id] = std::move(session);
 	}
+
 	void DropLost(const string &attach_id) {
 		lock_guard<mutex> guard(lock);
 		auto entry = sessions.find(attach_id);

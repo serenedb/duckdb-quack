@@ -58,6 +58,7 @@ struct QuackResultStream {
 		vector<string> names;
 		bool described_only = false;
 	};
+
 	//! A copy of the columns: the statement may still bind while PREPARE answers
 	Columns GetColumns() {
 		lock_guard<mutex> guard(bind_lock);
