@@ -221,8 +221,13 @@ public:
 
 private:
 	unique_ptr<QuackMessage> Dispatch(QuackRequest &request, QuackServerHost &host, const QuackWaker &waker);
+	unique_ptr<QuackMessage> Decode(QuackRequest &request, DatabaseInstance &db);
 	unique_ptr<QuackMessage> Connect(QuackRequest &request, QuackServerHost &host);
+	bool ReserveSession(idx_t max_sessions);
+	shared_ptr<QuackConnection> OpenConnection(QuackRequest &request, QuackServerHost &host,
+	                                           idx_t heartbeat_timeout_seconds);
 	unique_ptr<QuackMessage> Prepare(QuackRequest &request, const QuackWaker &waker);
+	void CacheResult(QuackRequest &request, DatabaseInstance &db);
 	unique_ptr<QuackMessage> Fetch(QuackRequest &request, const QuackWaker &waker);
 	unique_ptr<QuackMessage> SendData(QuackRequest &request, const QuackWaker &waker);
 	unique_ptr<QuackMessage> Cancel(QuackRequest &request);
@@ -234,6 +239,8 @@ private:
 	bool RenewConnectionLease(const string &connection_id, const shared_ptr<QuackConnection> &connection);
 	//! Drops caches idle past quack_result_ttl
 	void SweepExpiredCaches(DatabaseInstance &db);
+	vector<CacheExpiryEntry> TakeStaleCacheSlots(timestamp_t now, int64_t ttl_micros);
+	void RequeueCacheSlots(vector<CacheExpiryEntry> &slots);
 	//! Give `connection` its expiry-queue slot when its cache is created; caller must hold connection.lock.
 	void RegisterCacheForExpiry(QuackConnection &connection);
 	string GenerateConnectionId();
