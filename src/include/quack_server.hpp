@@ -30,8 +30,9 @@ public:
 	virtual ~QuackHostSession() = default;
 
 	virtual ClientContext &Context() = 0;
-	//! Drive `runner` with Step until it finishes, after the statements handed over before it. Must not
-	//! wait for the statement.
+	//! Drive `runner` with Step until it finishes, once the statement before it did. It replaces a runner that waits
+	//! to start, whose statement its PREPARE stopped, and is dropped when it is Stopped already: a later PREPARE, a
+	//! cancel or the end of the session stopped it on its way. Must not wait for the statement.
 	virtual void Run(unique_ptr<QuackStatementRunner> runner) = 0;
 	//! Interrupt the running statement, and make its driver look at it again.
 	virtual void Interrupt() = 0;

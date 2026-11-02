@@ -39,24 +39,33 @@ public:
 
 	//! Run one slice. `on_reschedule` fires, from any thread, once a BLOCKED statement can go on.
 	QuackRunState Step(const std::function<void()> &on_reschedule);
+	//! The server stopped the statement, for a later PREPARE, a cancel or the end of the session. Asked before the
+	//! runner finished.
+	bool Stopped() const;
 
 private:
-	//! Parse the SQL once. It holds one command, as a prepared statement does in PostgreSQL.
-	void Parse();
-	//! Submit the next statement, or close the stream after the last one
-	QuackRunState SubmitNext();
+	//! Point the session at the stream and parse the SQL. It holds one command, as a prepared statement does in
+	//! PostgreSQL.
+	void Start();
 	//! Bind the statement and close the stream with its columns. False when the command expands to several
 	//! statements: binding a later one can need the earlier ones run.
 	bool Describe();
+	QuackRunState Submit(unique_ptr<SQLStatement> statement);
+	//! Run a slice of the submitted statement, and keep its result once it completes
+	QuackRunState Execute(const std::function<void()> &on_reschedule);
+	//! After the last statement: send its result unless rows went into the stream, and close the stream
+	QuackRunState FinishStream();
 	//! The statements returned no rows: the last one's Success/Count result becomes batch 1
 	void SendLastResult();
-	void Fail(ErrorData error);
+	QuackRunState Done();
+	//! `error` is a copy: it may come from the result that Fail drops
+	QuackRunState Fail(ErrorData error);
 
 	ClientContext &context;
 	shared_ptr<QuackResultStream> stream;
 	string sql;
-	bool describe_only;
-	bool parsed = false;
+	const bool describe_only;
+	bool started = false;
 	vector<unique_ptr<SQLStatement>> statements;
 	idx_t next_statement = 0;
 	unique_ptr<QueryResult> running;

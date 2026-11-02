@@ -8,6 +8,8 @@
 #include "quack_message.hpp"
 #include "quack_session_state.hpp"
 
+#include <absl/cleanup/cleanup.h>
+
 namespace duckdb {
 
 QuackStatementRunner::QuackStatementRunner(ClientContext &context_p, shared_ptr<QuackResultStream> stream_p,
@@ -16,114 +18,56 @@ QuackStatementRunner::QuackStatementRunner(ClientContext &context_p, shared_ptr<
 }
 
 QuackStatementRunner::~QuackStatementRunner() {
-	if (!finished) {
-		Fail(ErrorData(ExceptionType::INTERRUPT, "Interrupted: the statement was abandoned"));
+	if (finished) {
+		return;
 	}
+	ErrorData error(ExceptionType::INTERRUPT, "Interrupted: the statement was abandoned");
+	if (started) {
+		Fail(std::move(error));
+	} else {
+		stream->buffer.SetError(std::move(error));
+	}
+}
+
+bool QuackStatementRunner::Stopped() const {
+	return stream->buffer.Finished();
 }
 
 QuackRunState QuackStatementRunner::Step(const std::function<void()> &on_reschedule) {
 	if (finished) {
 		return QuackRunState::FINISHED;
 	}
+	// Any error ends the statement and goes to the client in its stream
 	try {
-		if (!running) {
-			return SubmitNext();
+		if (running) {
+			return Execute(on_reschedule);
 		}
-		if (stream->buffer.HasError()) {
-			// an abort that came before the statement started was cleared by its start
-			context.Interrupt();
+		if (Stopped()) {
+			// no further statement of it runs
+			return Done();
 		}
-		switch (running->ExecuteTask(on_reschedule)) {
-		case QueryResultState::NOT_READY:
-			return QuackRunState::NOT_READY;
-		case QueryResultState::BLOCKED:
-		case QueryResultState::NO_TASKS_AVAILABLE:
-			return QuackRunState::BLOCKED;
-		case QueryResultState::READY:
-		case QueryResultState::FINISHED:
-		case QueryResultState::EXECUTION_ERROR:
-			break;
+		if (!started) {
+			Start();
+			if (describe_only && Describe()) {
+				return Done();
+			}
 		}
-		if (running->HasError()) {
-			Fail(running->GetErrorObject());
-			return QuackRunState::FINISHED;
+		if (next_statement == statements.size()) {
+			return FinishStream();
 		}
-		// A statement the fetch collector claimed leaves its rows in the stream, any other one keeps them
-		auto result = running->TakeCollectorResult();
-		if (!result) {
-			running->Complete();
-			result = std::move(running);
-		}
-		running.reset();
-		if (result->HasError()) {
-			Fail(result->GetErrorObject());
-			return QuackRunState::FINISHED;
-		}
-		last_result = std::move(result);
-		return QuackRunState::NOT_READY;
+		return Submit(std::move(statements[next_statement++]));
 	} catch (std::exception &ex) {
-		Fail(ErrorData(ex));
-		return QuackRunState::FINISHED;
+		return Fail(ErrorData(ex));
 	}
 }
 
-QuackRunState QuackStatementRunner::SubmitNext() {
-	if (stream->buffer.Finished()) {
-		// The server aborted the statement, so no further statement of it runs
-		finished = true;
-		return QuackRunState::FINISHED;
-	}
-	// A scan of client data that binds now belongs to this statement. Set here, on the session's thread, and not by
-	// the PREPARE: the statement before this one may still be binding.
+void QuackStatementRunner::Start() {
+	started = true;
+	// A scan of client data that binds from now on belongs to this statement. Set here, on the session's thread, and
+	// not by the PREPARE: the statement before this one may still be binding.
 	if (auto session_state = QuackSessionState::Get(context)) {
 		session_state->SetStatement(stream);
 	}
-	Parse();
-	if (describe_only) {
-		describe_only = false;
-		if (Describe()) {
-			finished = true;
-			return QuackRunState::FINISHED;
-		}
-	}
-	if (next_statement == statements.size()) {
-		if (!stream->Bound()) {
-			SendLastResult();
-		}
-		// Close against the announced total, so a short stream errors instead of truncating.
-		stream->buffer.Finish(stream->announced_total);
-		finished = true;
-		return QuackRunState::FINISHED;
-	}
-	auto statement = std::move(statements[next_statement++]);
-	// The first statement that returns rows sends them into the stream, every other one keeps the default
-	// collector (see MakeQuackFetchCollector).
-	auto &config = ClientConfig::GetConfig(context);
-	config.get_result_collector = [captured = stream](ClientContext &ctx, PreparedStatementData &data) {
-		return MakeQuackFetchCollector(ctx, data, captured);
-	};
-	QueryParameters parameters;
-	parameters.result_eagerness = ResultEagerness::FORCED;
-	parameters.caller_drives = true;
-	try {
-		running = context.Submit(std::move(statement), parameters);
-	} catch (...) {
-		config.get_result_collector = nullptr;
-		throw;
-	}
-	config.get_result_collector = nullptr;
-	if (running->HasError()) {
-		Fail(running->GetErrorObject());
-		return QuackRunState::FINISHED;
-	}
-	return QuackRunState::NOT_READY;
-}
-
-void QuackStatementRunner::Parse() {
-	if (parsed) {
-		return;
-	}
-	parsed = true;
 	auto iterator = context.IterateStatements(sql);
 	idx_t commands = 0;
 	while (iterator.Peek()) {
@@ -146,6 +90,69 @@ bool QuackStatementRunner::Describe() {
 	stream->announced_total = 0;
 	stream->buffer.Finish(stream->announced_total);
 	return true;
+}
+
+QuackRunState QuackStatementRunner::Submit(unique_ptr<SQLStatement> statement) {
+	// The first statement that returns rows sends them into the stream, every other one keeps the default
+	// collector (see MakeQuackFetchCollector).
+	auto &config = ClientConfig::GetConfig(context);
+	config.get_result_collector = [captured = stream](ClientContext &ctx, PreparedStatementData &data) {
+		return MakeQuackFetchCollector(ctx, data, captured);
+	};
+	absl::Cleanup reset_collector = [&config] {
+		config.get_result_collector = nullptr;
+	};
+	QueryParameters parameters;
+	parameters.result_eagerness = ResultEagerness::FORCED;
+	parameters.caller_drives = true;
+	running = context.Submit(std::move(statement), parameters);
+	std::move(reset_collector).Invoke();
+	if (running->HasError()) {
+		return Fail(running->GetErrorObject());
+	}
+	return QuackRunState::NOT_READY;
+}
+
+QuackRunState QuackStatementRunner::Execute(const std::function<void()> &on_reschedule) {
+	if (stream->buffer.HasError()) {
+		// an abort that came before the statement started was cleared by its start
+		context.Interrupt();
+	}
+	switch (running->ExecuteTask(on_reschedule)) {
+	case QueryResultState::NOT_READY:
+		return QuackRunState::NOT_READY;
+	case QueryResultState::BLOCKED:
+	case QueryResultState::NO_TASKS_AVAILABLE:
+		return QuackRunState::BLOCKED;
+	case QueryResultState::READY:
+	case QueryResultState::FINISHED:
+	case QueryResultState::EXECUTION_ERROR:
+		break;
+	}
+	if (running->HasError()) {
+		return Fail(running->GetErrorObject());
+	}
+	// A statement the fetch collector claimed leaves its rows in the stream, any other one keeps them
+	auto result = running->TakeCollectorResult();
+	if (!result) {
+		running->Complete();
+		result = std::move(running);
+	}
+	running.reset();
+	if (result->HasError()) {
+		return Fail(result->GetErrorObject());
+	}
+	last_result = std::move(result);
+	return QuackRunState::NOT_READY;
+}
+
+QuackRunState QuackStatementRunner::FinishStream() {
+	if (!stream->Bound()) {
+		SendLastResult();
+	}
+	// Close against the announced total, so a short stream errors instead of truncating.
+	stream->buffer.Finish(stream->announced_total);
+	return Done();
 }
 
 void QuackStatementRunner::SendLastResult() {
@@ -181,14 +188,19 @@ void QuackStatementRunner::SendLastResult() {
 	stream->announced_total = 1;
 }
 
-void QuackStatementRunner::Fail(ErrorData error) {
+QuackRunState QuackStatementRunner::Done() {
 	finished = true;
+	return QuackRunState::FINISHED;
+}
+
+QuackRunState QuackStatementRunner::Fail(ErrorData error) {
 	running.reset();
 	stream->buffer.SetError(error);
 	// A failed statement must stop the client's sends, so its scan's streams get the error too.
 	if (auto session_state = QuackSessionState::Get(context)) {
 		session_state->Streams().Fail(error);
 	}
+	return Done();
 }
 
 } // namespace duckdb
