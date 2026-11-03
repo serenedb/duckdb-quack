@@ -15,6 +15,8 @@ class ClientContext;
 
 //! The error of a request on a session the server does not know
 static constexpr const char *QUACK_INVALID_CONNECTION_ID = "Invalid connection id";
+//! The error of the request that finds its session's lease ran out, which ends the session
+static constexpr const char *QUACK_LEASE_EXPIRED = "Connection heartbeat lease expired";
 //! The Quack wire-protocol versions this build speaks. Client and server agree on one during the connection
 //! handshake.
 static constexpr idx_t QUACK_MIN_VERSION = 3;

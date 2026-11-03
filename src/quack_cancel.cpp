@@ -53,8 +53,7 @@ static void QuackCancelScan(ClientContext &context, TableFunctionInput &input, D
 	}
 	state.finished = true;
 
-	auto catalog_name = data.catalog_name;
-	auto &catalog = QuackCatalog::GetQuackCatalog(context, catalog_name);
+	auto &catalog = QuackCatalog::GetQuackCatalog(context, data.catalog_name);
 	auto client_connection = catalog.GetClientConnection(context);
 	auto client_wrapper = client_connection->GetClient(context);
 	// Target connection goes in the header; zero UUID = cancel whatever is running

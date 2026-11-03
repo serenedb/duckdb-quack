@@ -1,5 +1,4 @@
 #include "duckdb/common/exception.hpp"
-#include "duckdb/common/random_engine.hpp"
 #include "duckdb/common/types/uuid.hpp"
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/main/connection.hpp"
@@ -23,7 +22,6 @@
 #include "storage/quack_insert.hpp"
 #include "quack_message.hpp"
 #include "quack_client.hpp"
-#include "quack_storage.hpp"
 #include "storage/quack_transaction.hpp"
 #include "quack_session_state.hpp"
 
@@ -81,22 +79,6 @@ QuackCatalog::QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri_p,
 	if (load_info.schemas->Count() > 0) {
 		default_schema = Identifier(load_info.schemas->GetValue(4, 0).GetValue<string>());
 	}
-	auto random = make_shared_ptr<RandomEngine>();
-	heartbeat.Start(
-	    QuackStorageExtensionInfo::GetState(*context.db).scheduler,
-	    [this, random] { return QuackHeartbeatInterval(LeaseSeconds(), *random); }, [this] { SendHeartbeats(); });
-}
-
-idx_t QuackCatalog::LeaseSeconds() {
-	// a server may give a shorter lease than the attachment asked for
-	auto lease = heartbeat_timeout_seconds;
-	lock_guard<mutex> guard(sessions_lock);
-	for (auto &entry : sessions) {
-		if (auto session = entry.lock()) {
-			lease = MinValue(lease, session->HeartbeatTimeoutSeconds());
-		}
-	}
-	return lease;
 }
 
 shared_ptr<QuackClientConnection> QuackCatalog::GetClientConnection(ClientContext &context) {
@@ -105,6 +87,7 @@ shared_ptr<QuackClientConnection> QuackCatalog::GetClientConnection(ClientContex
 		return session;
 	}
 	auto session = QuackClient::ConnectToServer(context, server_uri, token, client_id, heartbeat_timeout_seconds);
+	session->StartHeartbeat();
 	{
 		lock_guard<mutex> guard(sessions_lock);
 		// drop the sessions whose local context ended, so the list stays as long as the live ones
@@ -123,28 +106,6 @@ void QuackCatalog::DropLostSession(ClientContext &context) {
 	}
 }
 
-void QuackCatalog::SendHeartbeats() {
-	vector<shared_ptr<QuackClientConnection>> live;
-	{
-		lock_guard<mutex> guard(sessions_lock);
-		for (auto &entry : sessions) {
-			if (auto session = entry.lock()) {
-				live.push_back(std::move(session));
-			}
-		}
-	}
-	// each on its own, so a slow answer for one session delays the lease of no other
-	for (auto &session : live) {
-		QuackStorageExtensionInfo::RunInBackground(GetDatabase(), [session] {
-			try {
-				session->SendHeartbeat();
-			} catch (...) {
-				// a failed heartbeat is retried on the next round; the session's next request reports a lost lease
-			}
-		});
-	}
-}
-
 QuackLoadCatalogData QuackCatalog::LoadCatalog(ClientContext &context) {
 	QuackLoadCatalogData result;
 	result.schemas = ExecuteCommandInternal(context, QuackSchemaSet::GetLoadQuery());
@@ -153,7 +114,6 @@ QuackLoadCatalogData QuackCatalog::LoadCatalog(ClientContext &context) {
 }
 
 QuackCatalog::~QuackCatalog() {
-	heartbeat.Stop();
 }
 
 void QuackCatalog::OnDetach(ClientContext &) {
@@ -331,7 +291,7 @@ shared_ptr<QuackSchemaSet> QuackCatalog::AcquireSnapshot(ClientContext &context)
 	return snapshot;
 }
 
-QuackCatalog &QuackCatalog::GetQuackCatalog(ClientContext &context, Value &catalog_name) {
+QuackCatalog &QuackCatalog::GetQuackCatalog(ClientContext &context, const Value &catalog_name) {
 	if (catalog_name.IsNull()) {
 		throw BinderException("Catalog cannot be NULL");
 	}

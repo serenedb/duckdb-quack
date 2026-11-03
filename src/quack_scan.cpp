@@ -19,8 +19,7 @@ namespace duckdb {
 static unique_ptr<PrepareResponseMessage> RunRemoteQuery(ClientContext &context, QuackScanBindData &bind_data,
                                                          hugeint_t query_uuid, bool describe_only = false) {
 	if (bind_data.use_transaction) {
-		auto catalog_name = bind_data.catalog_name;
-		QuackTransaction::Get(context, QuackCatalog::GetQuackCatalog(context, catalog_name)).ForceStart();
+		QuackTransaction::Get(context, QuackCatalog::GetQuackCatalog(context, bind_data.catalog_name)).ForceStart();
 	}
 	auto &client_connection = *bind_data.client_connection;
 	auto prepare = client_connection.MakePrepare(bind_data.query, query_uuid);
@@ -31,8 +30,7 @@ static unique_ptr<PrepareResponseMessage> RunRemoteQuery(ClientContext &context,
 //! The query was a statement pushed down by the RemotePushdownOptimizer, and the server ran it (PREPARE runs the
 //! query), so the snapshot of the remote catalog is out of date
 static void InvalidateCatalog(ClientContext &context, QuackScanBindData &bind_data) {
-	auto catalog_name = bind_data.catalog_name;
-	QuackCatalog::GetQuackCatalog(context, catalog_name).Invalidate();
+	QuackCatalog::GetQuackCatalog(context, bind_data.catalog_name).Invalidate();
 }
 
 //! Learn the query's columns from the server. A server that cannot describe it runs it, and the first execution
@@ -271,8 +269,7 @@ static bool ReconnectsEnabled(ClientContext &context) {
 //! bind's session: the attached database has a new one then, and a scan with its own connection opens it again.
 static shared_ptr<QuackClientConnection> ScanConnection(ClientContext &context, QuackScanBindData &bind_data) {
 	if (!bind_data.catalog_name.IsNull()) {
-		auto catalog_name = bind_data.catalog_name;
-		auto &catalog = QuackCatalog::GetQuackCatalog(context, catalog_name);
+		auto &catalog = QuackCatalog::GetQuackCatalog(context, bind_data.catalog_name);
 		// a run that binds nothing joins the statement's transaction here, which forgets a session the server lost
 		QuackTransaction::Get(context, catalog);
 		return catalog.GetClientConnection(context);

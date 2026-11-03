@@ -167,10 +167,8 @@ public:
 		return statements_started;
 	}
 
-	//! Keep the lease alive from a thread of this connection's own. A connection of an attached database is
-	//! kept alive by the database instead.
+	//! Keep the lease alive until the connection closes
 	void StartHeartbeat();
-	void SendHeartbeat() const;
 
 	const string &ConnectionId() const {
 		return connection_id;
@@ -218,6 +216,7 @@ private:
 	friend class QuackClient;
 
 	unique_ptr<QuackClient> TakeClient(optional_ptr<ClientContext> context) const;
+	void SendHeartbeat() const;
 
 	DatabaseInstance &db;
 	QuackUri uri;

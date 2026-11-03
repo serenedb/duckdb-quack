@@ -1,6 +1,7 @@
 #include "duckdb/catalog/catalog_transaction.hpp"
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/common/fault_points.hpp"
 #include "duckdb/common/random_engine.hpp"
 #include "duckdb/common/time_point.hpp"
 #include "duckdb/main/database.hpp"
@@ -10,7 +11,6 @@
 
 #include "quack_client.hpp"
 #include "quack_secret.hpp"
-#include "quack_session_state.hpp"
 #include "quack_settings.hpp"
 #include "quack_storage.hpp"
 #include "quack_uri.hpp"
@@ -320,6 +320,9 @@ void QuackClientConnection::SendHeartbeat() const {
 	if (closed) {
 		return;
 	}
+	SDB_IF_FAILURE("quack_heartbeat_paused") {
+		return;
+	}
 	auto client = TakeClient(nullptr);
 	client->SetOwnerConnection(this);
 	client->Request<SuccessResponse>(nullptr, make_uniq<HeartbeatRequestMessage>(connection_id),
@@ -455,15 +458,6 @@ unique_ptr<QuackClientWrapper> QuackClientConnection::GetClient(ClientContext &c
 		    "server has to be restarted; DETACH and ATTACH again to use it afterwards.",
 		    uri.Uri());
 	}
-	// An in-process server shares the attached catalogs with its clients. A statement it runs for connection X
-	// must not send a request over X: it would supersede itself and hang.
-	if (auto session_state = QuackSessionState::Get(context)) {
-		if (session_state->ConnectionId() == connection_id) {
-			throw InvalidInputException("A statement cannot route back through its own connection (database %s is "
-			                            "attached through the connection this statement runs for)",
-			                            uri.Uri());
-		}
-	}
 	auto result = TakeClient(context);
 	return make_uniq<QuackClientWrapper>(std::move(result), shared_from_this());
 }
@@ -475,7 +469,8 @@ void QuackClient::NoteError(const ErrorResponse &error_response) {
 	if (error_response.MustInvalidate()) {
 		owner_connection->MarkServerInvalidated();
 	}
-	if (error_response.Error().RawMessage() == QUACK_INVALID_CONNECTION_ID) {
+	auto &message = error_response.Error().RawMessage();
+	if (message == QUACK_INVALID_CONNECTION_ID || message == QUACK_LEASE_EXPIRED) {
 		owner_connection->MarkLost();
 	}
 }

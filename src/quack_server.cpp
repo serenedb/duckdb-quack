@@ -460,7 +460,7 @@ unique_ptr<QuackMessage> QuackServer::Decode(QuackRequest &request, DatabaseInst
 	request.message = QuackMessage::DeserializeMessage(deserializer, request.header);
 	// Only supported, structurally valid messages for an existing session renew its lease.
 	if (request.connection && !RenewConnectionLease(request.header.connection_id, request.connection)) {
-		return make_uniq<ErrorResponse>("Connection heartbeat lease expired");
+		return make_uniq<ErrorResponse>(QUACK_LEASE_EXPIRED);
 	}
 	return nullptr;
 }

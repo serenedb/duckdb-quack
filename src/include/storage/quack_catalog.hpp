@@ -11,7 +11,6 @@
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "storage/quack_schema.hpp"
-#include "quack_periodic_worker.hpp"
 #include "quack_uri.hpp"
 
 namespace duckdb {
@@ -36,7 +35,7 @@ public:
 	optional<Identifier> GetDefaultSchema() const override {
 		return default_schema;
 	}
-	static QuackCatalog &GetQuackCatalog(ClientContext &context, Value &catalog_name);
+	static QuackCatalog &GetQuackCatalog(ClientContext &context, const Value &catalog_name);
 	static bool IsQuackScan(const string &name);
 	bool SupportsPushdown(const TableRef &ref) override;
 	void Initialize(bool load_builtin) override;
@@ -106,9 +105,6 @@ private:
 	QuackSchemaSet &GetSchemas(ClientContext &context);
 	shared_ptr<QuackSchemaSet> AcquireSnapshot(ClientContext &context);
 	bool ServesOwnConnection(ClientContext &context);
-	void SendHeartbeats();
-	//! The lease the server gave the sessions: heartbeats come three times in it
-	idx_t LeaseSeconds();
 
 private:
 	QuackUri server_uri;
@@ -118,9 +114,8 @@ private:
 	//! Tells this ATTACH apart from the others in the sessions a local context holds
 	string attach_id;
 	mutex sessions_lock;
-	//! The sessions handed out, kept alive by one heartbeat for all of them
+	//! The sessions handed out, which a DETACH ends
 	vector<weak_ptr<QuackClientConnection>> sessions;
-	QuackPeriodicWorker heartbeat;
 	mutex snapshot_lock;
 	shared_ptr<QuackSchemaSet> snapshot;
 	idx_t invalidated_version = 0;
