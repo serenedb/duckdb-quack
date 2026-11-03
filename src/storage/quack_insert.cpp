@@ -159,9 +159,6 @@ PhysicalOperator &QuackCatalog::PlanInsert(ClientContext &context, PhysicalPlanG
 		throw NotImplementedException("RETURNING not yet supported for QUACK_INSERT");
 	}
 	D_ASSERT(plan);
-	if (!op.column_index_map.empty()) {
-		plan = planner.ResolveDefaultsProjection(op, *plan);
-	}
 	auto &insert = planner.Make<QuackInsert>(op, op.table);
 	insert.children.push_back(*plan);
 	ConfigureOrdering(context, insert.Cast<QuackInsert>(), *plan);

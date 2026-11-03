@@ -3,7 +3,6 @@
 #include "duckdb/main/query_result.hpp"
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/main/secret/secret.hpp"
-#include "duckdb/planner/filter/conjunction_filter.hpp"
 #include "duckdb/planner/table_filter.hpp"
 
 #include "quack_scan.hpp"
