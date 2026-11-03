@@ -129,8 +129,13 @@ void QuackStorageExtensionInfo::SetServes(ServesFunction serves_p) {
 }
 
 bool QuackStorageExtensionInfo::Serves(const string &host, uint16_t port) {
-	lock_guard<mutex> guard(serves_lock);
-	return serves && serves(host, port);
+	ServesFunction check;
+	{
+		// the check may resolve the host, which no other connect waits for
+		lock_guard<mutex> guard(serves_lock);
+		check = serves;
+	}
+	return check && check(host, port);
 }
 
 void QuackStorageExtensionInfo::AddServer(QuackServer &server) {
