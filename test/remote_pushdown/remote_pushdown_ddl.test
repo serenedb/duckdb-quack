@@ -26,7 +26,7 @@ insert into local_t values (1), (2)
 query II
 explain create table rpc.t2(a int, b varchar default 'x')
 ----
-physical_plan	<REGEX>:.*Quack Query.*
+physical_plan	<REGEX>:.*QUACK_QUERY.*
 
 # it really ran on the server
 query I quack_db:quack_server_con
@@ -227,7 +227,7 @@ alter sequence rpc.owned_seq owned by rpc.owner_t
 query II
 explain create temp table tmp_t(i int)
 ----
-physical_plan	<!REGEX>:.*Quack Query.*
+physical_plan	<!REGEX>:.*QUACK_QUERY.*
 
 statement ok
 create temp table tmp_t(i int)
@@ -236,7 +236,7 @@ create temp table tmp_t(i int)
 query II
 explain create table rpc.from_local as select * from local_t
 ----
-physical_plan	<!REGEX>:.*Quack Query.*
+physical_plan	<!REGEX>:.*QUACK_QUERY.*
 
 # a view over a remote table can still be created locally - its body is pushed on its own
 statement ok
@@ -251,7 +251,7 @@ select count(*) from local_v
 query II
 explain create table local_t2(i int)
 ----
-physical_plan	<!REGEX>:.*Quack Query.*
+physical_plan	<!REGEX>:.*QUACK_QUERY.*
 
 # --- unqualified DDL resolves through the search path ---
 

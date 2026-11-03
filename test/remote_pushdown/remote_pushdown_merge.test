@@ -34,7 +34,7 @@ explain merge into rpc.target t using rpc.source s on t.k = s.k
   when matched then update set v = s.v
   when not matched then insert values (s.k, s.v)
 ----
-physical_plan	<REGEX>:.*Quack Query.*
+physical_plan	<REGEX>:.*QUACK_QUERY.*
 
 query II
 select k, v from rpc.target order by k
@@ -164,7 +164,7 @@ select k, v from local_tgt order by k
 query II
 explain merge into local_tgt t using local_src s on t.k = s.k when matched then update set v = s.v
 ----
-physical_plan	<!REGEX>:.*Quack Query.*
+physical_plan	<!REGEX>:.*QUACK_QUERY.*
 
 # a remote target with a local source cannot be pushed, and the catalog layer does not support it -
 # the same pre-existing boundary as UPDATE/DELETE on a remote table with local data
