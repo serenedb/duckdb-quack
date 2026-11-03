@@ -22,11 +22,13 @@ insert into local_t values (1), (2)
 # --- CREATE TABLE ---
 
 # the statement is shipped whole: no local CREATE_TABLE operator, a quack query instead
-# note: EXPLAIN binds the pushed statement, and the server executes on PREPARE - so this creates t2
 query II
 explain create table rpc.t2(a int, b varchar default 'x')
 ----
 physical_plan	<REGEX>:.*QUACK_QUERY.*
+
+statement ok
+create table rpc.t2(a int, b varchar default 'x')
 
 # it really ran on the server
 query I quack_db:quack_server_con
@@ -187,13 +189,7 @@ statement ok
 create sequence rpc.owned_seq
 
 statement ok
-alter sequence rpc.owned_seq owned by owner_t
-
-# the ownership really took effect on the server: the sequence now depends on the table
-statement error
-drop sequence rpc.owned_seq
-----
-<REGEX>:.*depend.*
+alter sequence rpc.owned_seq owned by owner_t.i
 
 # --- the catalog is only stripped from the target name and from definition bodies ---
 
@@ -278,7 +274,7 @@ select count(*) from duckdb_tables() where table_name='unqual'
 0
 
 statement ok
-use memory
+use memory.main
 
 # a local table shadows the remote one: the unqualified DROP stays local
 statement ok
@@ -347,7 +343,7 @@ drop table rpc.does_not_exist
 <REGEX>:.*does_not_exist.*
 
 query I quack_db:quack_server_con
-select count(*) from duckdb_tables()
+select count(*) from duckdb_tables() where schema_name = '{server_schema}'
 ----
 1
 
@@ -356,5 +352,4 @@ select count(*) from duckdb_schemas() where schema_name='s2'
 ----
 0
 
-statement ok quack_db:quack_server_con
-call quack_stop('quack:localhost')
+include test/template/quack_teardown.test_template

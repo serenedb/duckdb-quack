@@ -15,74 +15,74 @@ attach {server} as rpc
 
 # Verify projection pushdown: selecting one column should only project that column
 query II
-EXPLAIN SELECT i FROM rpc.main.test_data;
+EXPLAIN SELECT i FROM rpc.{server_schema}.test_data;
 ----
 physical_plan	<REGEX>:.*Projections: i.*
 
 # Verify projection pushdown: selecting two columns
 query II
-EXPLAIN SELECT i, name FROM rpc.main.test_data;
+EXPLAIN SELECT i, name FROM rpc.{server_schema}.test_data;
 ----
 physical_plan	<REGEX>:.*Projections:.*i.*name.*
 
 # disabled for 1.5
 # # Verify filter pushdown appears in the physical plan
 # query II
-# EXPLAIN SELECT i FROM rpc.main.test_data WHERE i = 42;
+# EXPLAIN SELECT i FROM rpc.{server_schema}.test_data WHERE i = 42;
 # ----
 # physical_plan	<REGEX>:.*Filters:.*i=42.*
 #
 # # Verify range filter pushdown
 # query II
-# EXPLAIN SELECT i FROM rpc.main.test_data WHERE i > 9990;
+# EXPLAIN SELECT i FROM rpc.{server_schema}.test_data WHERE i > 9990;
 # ----
 # physical_plan	<REGEX>:.*Filters:.*i>9990.*
 #
 # # Verify multiple filters (AND)
 # query II
-# EXPLAIN SELECT i FROM rpc.main.test_data WHERE i >= 100 AND i < 200;
+# EXPLAIN SELECT i FROM rpc.{server_schema}.test_data WHERE i >= 100 AND i < 200;
 # ----
 # physical_plan	<REGEX>:.*Filters:.*i>=100.*i<200.*
 #
 # # Verify combined filter + projection pushdown
 # query II
-# EXPLAIN SELECT name FROM rpc.main.test_data WHERE i = 100;
+# EXPLAIN SELECT name FROM rpc.{server_schema}.test_data WHERE i = 100;
 # ----
 # physical_plan	<REGEX>:.*Projections:.*name.*
 
 # Correctness: filter pushdown returns correct results
 query I
-select i from rpc.main.test_data where i = 42;
+select i from rpc.{server_schema}.test_data where i = 42;
 ----
 42
 
 # Correctness: range filter
 query I
-select count(i) from rpc.main.test_data where i > 9990;
+select count(i) from rpc.{server_schema}.test_data where i > 9990;
 ----
 9
 
 # Correctness: combined filter and projection
 query I
-select name from rpc.main.test_data where i = 100;
+select name from rpc.{server_schema}.test_data where i = 100;
 ----
 name_100
 
 # Correctness: multiple conditions
 query I
-select count(i) from rpc.main.test_data where i >= 100 and i < 200;
+select count(i) from rpc.{server_schema}.test_data where i >= 100 and i < 200;
 ----
 100
 
 # Correctness: empty result
 query I
-select count(i) from rpc.main.test_data where i > 99999;
+select count(i) from rpc.{server_schema}.test_data where i > 99999;
 ----
 0
 
 # Correctness: no filter (full scan still works)
 query I
-select max(i) from rpc.main.test_data;
+select max(i) from rpc.{server_schema}.test_data;
 ----
 9999
 

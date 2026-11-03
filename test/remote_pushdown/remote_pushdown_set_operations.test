@@ -216,9 +216,9 @@ query I
 8
 9
 
-# Schema-qualified ORDER BY in mixed UNION: rpc.main.t1.i (4-part) also reduced to bare i
+# Schema-qualified ORDER BY in mixed UNION: rpc.{server_schema}.t1.i (4-part) also reduced to bare i
 query I
-(select i from rpc.main.t1) union all (select i from local_t) order by rpc.main.t1.i
+(select i from rpc.{server_schema}.t1) union all (select i from local_t) order by rpc.{server_schema}.t1.i
 ----
 0
 0

@@ -18,6 +18,11 @@ FROM quack_query_by_name('remote', 'SELECT sleep_ms(5000)');
 ----
 Interrupt
 
+# the server session ends with this local session, so keep it until the other thread has seen it cancelled
+onlyif threadid=0
+statement ok
+SELECT sleep_ms(2000);
+
 onlyif threadid=1
 statement ok
 ATTACH {server} AS remote2 (TOKEN 'asdf');
@@ -45,11 +50,12 @@ onlyif threadid=1
 statement ok
 FROM quack_cancel('remote2', getvariable('conn_id'));
 
-endloop
-
-query I quack_db:quack_server_con
-SELECT count(state) FROM quack_active_connections() where state = 'cancelled';
+onlyif threadid=1
+query I
+FROM quack_query_by_name('remote2', 'SELECT count(*) FROM quack_active_connections() WHERE state = ''cancelled''');
 ----
 1
+
+endloop
 
 include test/template/quack_teardown.test_template

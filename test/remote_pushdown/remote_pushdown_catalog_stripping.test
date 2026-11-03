@@ -186,27 +186,27 @@ create table local_t(local_col int);
 statement ok
 insert into local_t from range(10);
 
-# Bug 38a: schema-qualified ON condition — no alias; rpc.main.t1={0..9}, local_t={0..9}: 10 rows match
+# Bug 38a: schema-qualified ON condition — no alias; rpc.{server_schema}.t1={0..9}, local_t={0..9}: 10 rows match
 query I
-select count(*) from rpc.main.t1 join local_t on (rpc.main.t1.i = local_t.local_col)
+select count(*) from rpc.{server_schema}.t1 join local_t on (rpc.{server_schema}.t1.i = local_t.local_col)
 ----
 10
 
 # Bug 38b: schema-qualified ON condition — with explicit alias (rt1)
 statement error
-select count(*) from rpc.main.t1 as rt1 join local_t on (rpc.main.t1.i = local_t.local_col)
+select count(*) from rpc.{server_schema}.t1 as rt1 join local_t on (rpc.{server_schema}.t1.i = local_t.local_col)
 ----
 not found
 
 # Bug 38c: schema-qualified column ref in WHERE; 4 rows with local_col > 5
 query I
-select count(*) from rpc.main.t1 join local_t on (i = local_col) where rpc.main.t1.i > 5
+select count(*) from rpc.{server_schema}.t1 join local_t on (i = local_col) where rpc.{server_schema}.t1.i > 5
 ----
 4
 
 # Bug 38d: schema-qualified column ref in SELECT list
 query I
-select count(rpc.main.t1.i) from rpc.main.t1 join local_t on (i = local_col)
+select count(rpc.{server_schema}.t1.i) from rpc.{server_schema}.t1 join local_t on (i = local_col)
 ----
 10
 
@@ -250,7 +250,7 @@ select rpc.t1_struct.id from rpc.t1_struct join local_struct on (rpc.t1_struct.i
 
 # Bug 40a: schema-qualified struct field in SELECT — no alias
 query I
-select rpc.main.t1_struct.info.val from rpc.main.t1_struct join local_struct on (rpc.main.t1_struct.id = local_struct.id) order by 1
+select rpc.{server_schema}.t1_struct.info.val from rpc.{server_schema}.t1_struct join local_struct on (rpc.{server_schema}.t1_struct.id = local_struct.id) order by 1
 ----
 10
 20
@@ -258,13 +258,13 @@ select rpc.main.t1_struct.info.val from rpc.main.t1_struct join local_struct on 
 
 # Bug 40b: schema-qualified struct field in SELECT — with alias
 statement error
-select rpc.main.t1_struct.info.val from rpc.main.t1_struct as ts join local_struct on (rpc.main.t1_struct.id = local_struct.id) order by 1
+select rpc.{server_schema}.t1_struct.info.val from rpc.{server_schema}.t1_struct as ts join local_struct on (rpc.{server_schema}.t1_struct.id = local_struct.id) order by 1
 ----
 not found
 
 # Bug 40c: schema-qualified struct field in WHERE
 query I
-select rpc.main.t1_struct.id from rpc.main.t1_struct join local_struct on (rpc.main.t1_struct.id = local_struct.id) where rpc.main.t1_struct.info.val > 15 order by 1
+select rpc.{server_schema}.t1_struct.id from rpc.{server_schema}.t1_struct join local_struct on (rpc.{server_schema}.t1_struct.id = local_struct.id) where rpc.{server_schema}.t1_struct.info.val > 15 order by 1
 ----
 2
 3

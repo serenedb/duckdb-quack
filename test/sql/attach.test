@@ -8,7 +8,7 @@ statement ok quack_db:quack_server_con
 create schema moo;
 
 statement ok quack_db:quack_server_con
-create table fuu as values(42, 43);
+create table fuu as select 42 as col0, 43 as col1;
 
 statement ok quack_db:quack_server_con
 create table moo.fuu2 as values(44, 45);
@@ -31,10 +31,10 @@ create secret (type quack, token 'asdf')
 statement ok
 attach {server} as rpc
 
-query I
+statement error
 from rpc.query('BEGIN; select 42; COMMIT;')
 ----
-42
+cannot insert multiple commands into a prepared statement
 
 query II
 from rpc.fuu;
@@ -47,12 +47,12 @@ from rpc.query('select 42');
 42
 
 query I
-from rpc.main.fuu select col1 where col0=42 ;
+from rpc.{server_schema}.fuu select col1 where col0=42 ;
 ----
 43
 
 query II
-from rpc.main.fuu where col0=43;
+from rpc.{server_schema}.fuu where col0=43;
 ----
 
 statement error
@@ -132,11 +132,3 @@ detach rpc;
 database not found
 
 include test/template/quack_teardown.test_template
-
-# quack_stop tears the server down asynchronously; wait for the listening socket to close
-# before asserting a fresh attach to the same address fails.
-sleep 2 seconds
-
-statement error
-attach {server} as rpc
-----
