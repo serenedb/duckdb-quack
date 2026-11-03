@@ -31,7 +31,7 @@
         "id": 1,
         "name": "message",
         "type": "string",
-        "serialize_property": "error.RawMessage()"
+        "serialize_property": "TransferableMessage()"
       },
       {
         "id": 2,

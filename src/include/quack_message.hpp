@@ -676,6 +676,8 @@ public:
 	}
 	//! The exception type in its wire form (e.g. "Catalog"), empty if this response holds no error
 	string ExceptionTypeName() const;
+	//! The message without the stack trace an internal error carries (see IsTransferableErrorInfo)
+	string TransferableMessage() const;
 	//! The extra info minus the entries that only mean something in the process that raised the error
 	unordered_map<string, string> TransferableExtraInfo() const;
 

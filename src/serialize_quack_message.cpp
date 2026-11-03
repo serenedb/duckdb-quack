@@ -78,7 +78,7 @@ unique_ptr<DisconnectMessage> DisconnectMessage::Deserialize(Deserializer &deser
 }
 
 void ErrorResponse::Serialize(Serializer &serializer) const {
-	serializer.WritePropertyWithDefault<string>(1, "message", error.RawMessage());
+	serializer.WritePropertyWithDefault<string>(1, "message", TransferableMessage());
 	serializer.WritePropertyWithDefault<string>(2, "exception_type", ExceptionTypeName());
 	serializer.WritePropertyWithDefault<unordered_map<string, string>>(3, "extra_info", TransferableExtraInfo());
 	serializer.WritePropertyWithDefault<bool>(4, "must_invalidate", must_invalidate);

@@ -226,6 +226,10 @@ string ErrorResponse::ExceptionTypeName() const {
 	return Exception::ExceptionTypeToString(error.Type());
 }
 
+string ErrorResponse::TransferableMessage() const {
+	return error.RawMessageWithoutStackTrace();
+}
+
 unordered_map<string, string> ErrorResponse::TransferableExtraInfo() const {
 	return TransferableErrorInfo(error.ExtraInfo());
 }
