@@ -879,6 +879,19 @@ unique_ptr<QuackMessage> QuackServer::Fetch(QuackRequest &request, const QuackWa
 	}
 }
 
+//! Code that trusts its values reads a client's batch, so the batch has exactly the stream's types and only values
+//! they allow
+static void ValidateClientBatch(const QuackInsertStream &stream, const vector<unique_ptr<DataChunk>> &chunks) {
+	for (auto &chunk : chunks) {
+		if (chunk->GetTypes() != stream.types) {
+			throw InvalidInputException("A batch does not have the column types of its data stream");
+		}
+		for (auto &column : chunk->data) {
+			column.Validate();
+		}
+	}
+}
+
 //! Push the SEND_DATA's batch into the INSERT's stream. False while the request waits for room: a full buffer keeps
 //! the batch with the request until the scan frees some. The buffer drops a duplicate index, so a retry is safe.
 static bool PushClientBatch(QuackRequest &request, QuackInsertStream &stream, const QuackWaker &waker) {
@@ -920,6 +933,13 @@ unique_ptr<QuackMessage> QuackServer::SendData(QuackRequest &request, const Quac
 	if (request.phase == QuackRequest::Phase::START && !send_data_message.Chunks().empty()) {
 		if (!send_data_message.BatchIndex().IsValid()) {
 			return make_uniq<ErrorResponse>("send_data_request is missing its batch index");
+		}
+		try {
+			ValidateClientBatch(*stream, send_data_message.Chunks());
+		} catch (std::exception &ex) {
+			ErrorData error(ex);
+			stream->buffer.SetError(error);
+			return make_uniq<ErrorResponse>(std::move(error));
 		}
 		if (!PushClientBatch(request, *stream, waker)) {
 			return nullptr;
