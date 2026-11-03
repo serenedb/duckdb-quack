@@ -95,18 +95,18 @@ from s1.nope.leaf
 query II
 explain select count(*) from s1.child.leaf
 ----
-physical_plan	<REGEX>:.*Quack Query By Name.*
+physical_plan	<REGEX>:.*QUACK_QUERY_BY_NAME.*
 
 query II
 explain select count(*) from s1.child.leaf
 ----
-physical_plan	<!REGEX>:.*Seq Scan.*
+physical_plan	<!REGEX>:.*SEQ_SCAN.*
 
 # a table in a top-level schema is pushed down as a single remote query
 query II
 explain select count(*) from s1.mid
 ----
-physical_plan	<REGEX>:.*Quack Query By Name.*
+physical_plan	<REGEX>:.*QUACK_QUERY_BY_NAME.*
 
 # --- schema tree changes on the server are picked up by a cache refresh
 statement ok quack_db:quack_server_con

@@ -71,7 +71,7 @@ insert into memory.main.local_src select * from range(2000) t(i);
 query II
 explain insert into s1.child.t select * from memory.main.local_src
 ----
-physical_plan	<REGEX>:.*Quack Insert.*
+physical_plan	<REGEX>:.*QUACK_INSERT.*
 
 statement ok
 insert into s1.child.t select * from memory.main.local_src;
@@ -85,7 +85,7 @@ select count(*), sum(i) from s1.child.t
 query II
 explain create table s1.child.ctas as select i * 2 as d from memory.main.local_src
 ----
-physical_plan	<REGEX>:.*Quack Create Table As.*
+physical_plan	<REGEX>:.*QUACK_CREATE_TABLE_AS.*
 
 statement ok
 create table s1.child.ctas as select i * 2 as d from memory.main.local_src;
