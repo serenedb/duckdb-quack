@@ -7,6 +7,7 @@
 #include "duckdb/common/chrono.hpp"
 #include "duckdb/common/helper.hpp"
 #include "duckdb/common/mutex.hpp"
+#include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 
 namespace duckdb {
@@ -29,7 +30,7 @@ public:
 		state->tick = std::move(tick);
 		if (scheduler) {
 			state->scheduler = scheduler;
-			Arm(state);
+			Arm(state, state->interval());
 		} else {
 #if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
 			// Single-threaded wasm cannot start a thread, so the tick never runs there
@@ -68,8 +69,9 @@ private:
 		QuackScheduler scheduler;
 	};
 
-	//! Run the tick unless the worker stopped. False once it has.
-	static bool Tick(State &state) {
+	//! Run the tick unless the worker stopped. False once it has. `next_delay` is read while the tick still counts
+	//! as running, so Stop waits for it: `interval` may use the worker's owner.
+	static bool Tick(State &state, optional_ptr<milliseconds> next_delay = nullptr) {
 		{
 			lock_guard<mutex> guard(state.lock);
 			if (state.stopping) {
@@ -81,16 +83,19 @@ private:
 			state.tick();
 		} catch (...) { // NOLINT: a failed tick is retried on the next one
 		}
+		if (next_delay) {
+			*next_delay = state.interval();
+		}
 		lock_guard<mutex> guard(state.lock);
 		state.running = false;
 		return !state.stopping;
 	}
 
-	static void Arm(shared_ptr<State> state) {
-		auto delay = state->interval();
+	static void Arm(shared_ptr<State> state, milliseconds delay) {
 		state->scheduler(delay, [state] {
-			if (Tick(*state)) {
-				Arm(state);
+			milliseconds next_delay {};
+			if (Tick(*state, next_delay)) {
+				Arm(state, next_delay);
 			}
 		});
 	}
