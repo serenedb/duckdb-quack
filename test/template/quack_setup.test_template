@@ -23,4 +23,9 @@ set variable harness_connection = quack_connection_id('quack_server');
 set variable harness <variable:quack_server_con:harness_connection>
 
 statement ok quack_db:quack_server_con
+set variable server_schema_name = (from quack_query_by_name('quack_server', 'select current_schema()'));
+
+set variable server_schema <variable:quack_server_con:server_schema_name>
+
+statement ok quack_db:quack_server_con
 connect quack_server;

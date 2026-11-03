@@ -17,13 +17,13 @@ statement ok quack_db:quack_server_con
 insert into t2 values (5), (6), (7), (8), (9), (10), (11), (12), (13), (14);
 
 # rpc2: t3={0..4}, t4={10..14}
-statement ok quack_db2:quack_server_con2
-set variable actual_listen_uri = (select listen_uri from quack_serve('{QUACK_SERVER}:0', token='asdf2'));
+test-env QUACK_SERVER2 quack:localhost
 
 statement ok quack_db2:quack_server_con2
-set variable listen_uri = concat('''', getvariable('actual_listen_uri'), '''');
+attach '{QUACK_SERVER2}' as quack_server2 (token 'asdf');
 
-set variable server2 <variable:quack_server_con2:listen_uri>
+statement ok quack_db2:quack_server_con2
+connect quack_server2;
 
 statement ok quack_db2:quack_server_con2
 create table t3(k int);
@@ -41,7 +41,7 @@ statement ok
 attach {server} as rpc1 (token 'asdf')
 
 statement ok
-attach {server2} as rpc2 (token 'asdf2')
+attach '{QUACK_SERVER2}' as rpc2 (token 'asdf')
 
 # --- Single-catalog queries: each pushed to its own remote ---
 
@@ -171,10 +171,10 @@ select count(*) from t1 join rpc2.t3 on i = k
 statement ok
 use memory
 
-# --- Multiple remote catalogs in search path (SET search_path='rpc1,rpc2') ---
+# --- Multiple remote catalogs in search path (SET search_path = rpc1, rpc2) ---
 
 statement ok
-SET search_path='rpc1,rpc2'
+SET search_path = rpc1, rpc2
 
 # Explicitly qualified queries still push to their respective catalogs
 query II
@@ -225,4 +225,4 @@ RESET search_path
 include test/template/quack_teardown.test_template
 
 statement ok quack_db2:quack_server_con2
-call quack_stop({server2})
+disconnect;
