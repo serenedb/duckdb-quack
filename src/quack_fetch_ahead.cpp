@@ -226,7 +226,7 @@ void QuackFetcher::TopUp(ClientContext &context) {
 		auto request_index = next_request++;
 		FetchRequestMessage fetch_msg(connection_id, query_uuid, request_index, CurrentAck());
 		auto request_payload = make_uniq<MemoryStream>();
-		QuackClient::EncodeRequest(context, fetch_msg, *request_payload, connection->SereneDBPeer());
+		QuackClient::EncodeRequest(context, fetch_msg, *request_payload, connection->WireVersion());
 		auto request_size = request_payload->GetPosition();
 		queue->Register(make_uniq<QuackFetchDataTask>(*this, std::move(client), request_index,
 		                                              std::move(request_payload), request_size),

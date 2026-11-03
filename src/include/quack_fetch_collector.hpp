@@ -34,12 +34,13 @@ using QuackFetchPayloadBuffer = QuackClaimBuffer<QuackFetchPayload>;
 //! Server state for one client-facing result. The fetch collector fills the claim buffer with sealed
 //! payloads, out of order and under a byte limit. The FETCH handlers drain it.
 struct QuackResultStream {
-	QuackResultStream(idx_t capacity_bytes, bool serenedb_peer) : buffer(capacity_bytes), serenedb_peer(serenedb_peer) {
+	QuackResultStream(idx_t capacity_bytes, StorageVersion wire_version)
+	    : buffer(capacity_bytes), wire_version(wire_version) {
 	}
 
 	QuackFetchPayloadBuffer buffer;
-	//! The client is a SereneDB one: the payloads and their headers are written in its format
-	const bool serenedb_peer;
+	//! The storage version of the client's session, which the payloads and their headers are written in
+	const StorageVersion wire_version;
 
 	//! The statement's columns. With `described_only_p`, a describe-only PREPARE bound it and did not run it.
 	void SignalBound(vector<LogicalType> types_p, vector<string> names_p, bool described_only_p) {

@@ -80,7 +80,7 @@ public:
 	//! Encode a request (inject client_query_id when a query is active, then serialize) into `out`.
 	//! Protocol-level and lock-free; the caller owns `out` and any locking around it.
 	static void EncodeRequest(optional_ptr<ClientContext> context, QuackMessage &message, MemoryStream &out,
-	                          bool serenedb_peer);
+	                          StorageVersion wire_version);
 
 	//! Decode a response body (owned bytes) into a message. Protocol-level and lock-free.
 	static unique_ptr<QuackMessage> DecodeResponse(const string &response_body);
@@ -144,7 +144,7 @@ private:
 class QuackClientConnection : public enable_shared_from_this<QuackClientConnection> {
 public:
 	explicit QuackClientConnection(DatabaseInstance &db_p, unique_ptr<QuackClient> client_p, QuackUri uri_p,
-	                               string connection_id_p, idx_t quack_version_p, bool serenedb_peer_p,
+	                               string connection_id_p, idx_t quack_version_p, StorageVersion wire_version_p,
 	                               idx_t heartbeat_timeout_seconds_p, idx_t max_connections_cached);
 	~QuackClientConnection();
 
@@ -178,9 +178,13 @@ public:
 	idx_t QuackVersion() const {
 		return quack_version;
 	}
-	//! The server is a SereneDB one: the requests may carry the SereneDB fields (see QUACK_SERENEDB_HEADER)
+	//! The storage version the session writes, which CONNECT agreed on (see QUACK_SERENEDB_HEADER)
+	StorageVersion WireVersion() const {
+		return wire_version;
+	}
+	//! The server is a SereneDB one: the requests may carry the SereneDB fields
 	bool SereneDBPeer() const {
-		return serenedb_peer;
+		return IsSereneDBStorageVersion(wire_version);
 	}
 	idx_t HeartbeatTimeoutSeconds() const {
 		return heartbeat_timeout_seconds;
@@ -221,7 +225,7 @@ private:
 	string connection_id;
 	//! The protocol version agreed during the connection handshake
 	idx_t quack_version;
-	bool serenedb_peer;
+	StorageVersion wire_version;
 	//! Lease timeout accepted by the server during the connection handshake.
 	idx_t heartbeat_timeout_seconds;
 	mutable mutex lock;

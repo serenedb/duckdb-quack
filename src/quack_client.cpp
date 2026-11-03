@@ -103,7 +103,7 @@ optional_idx QuackActiveClientQueryId(ClientContext &context) {
 }
 
 void QuackClient::EncodeRequest(optional_ptr<ClientContext> context, QuackMessage &message, MemoryStream &out,
-                                bool serenedb_peer) {
+                                StorageVersion wire_version) {
 	if (context) {
 		// Inject client_query_id from the active query so client and server logs correlate.
 		auto client_query_id = QuackActiveClientQueryId(*context);
@@ -111,7 +111,7 @@ void QuackClient::EncodeRequest(optional_ptr<ClientContext> context, QuackMessag
 			message.SetClientQueryId(client_query_id);
 		}
 	}
-	message.ToMemoryStream(out, serenedb_peer);
+	message.ToMemoryStream(out, wire_version);
 }
 
 unique_ptr<QuackMessage> QuackClient::DecodeResponse(const string &response_body) {
@@ -146,7 +146,7 @@ string QuackClient::PostRawLocked(const_data_ptr_t data, idx_t size, optional_id
 	auto request_url = uri.Http() + "/quack";
 	HTTPHeaders headers = extra_headers;
 	if (type == MessageType::CONNECTION_REQUEST) {
-		headers.Insert(QUACK_SERENEDB_HEADER, "1");
+		headers.Insert(QUACK_SERENEDB_HEADER, QuackSereneDBHeader());
 	}
 	PostRequestInfo post_request(request_url, headers, *http_params, data, size);
 	unique_ptr<HTTPResponse> response;
@@ -209,7 +209,8 @@ unique_ptr<QuackMessage> QuackClient::RequestInternal(optional_ptr<ClientContext
 	EnsureHttpParams(context);
 
 	auto start_time = QuackNowMillis();
-	EncodeRequest(context, *request_message, write_stream, owner_connection && owner_connection->SereneDBPeer());
+	EncodeRequest(context, *request_message, write_stream,
+	              owner_connection ? owner_connection->WireVersion() : StorageVersion::DUCKDB_LATEST);
 	auto response_body =
 	    PostRawLocked(write_stream.GetData(), write_stream.GetPosition(), deadline, request_message->Type());
 	auto response_message = DecodeResponse(response_body);
@@ -240,10 +241,11 @@ unique_ptr<QuackClient> QuackClient::GetClient(ClientContext &context, const Qua
 }
 
 QuackClientConnection::QuackClientConnection(DatabaseInstance &db_p, unique_ptr<QuackClient> client_p, QuackUri uri_p,
-                                             string connection_id_p, idx_t quack_version_p, bool serenedb_peer_p,
-                                             idx_t heartbeat_timeout_seconds_p, idx_t max_connections_cached_p)
+                                             string connection_id_p, idx_t quack_version_p,
+                                             StorageVersion wire_version_p, idx_t heartbeat_timeout_seconds_p,
+                                             idx_t max_connections_cached_p)
     : db(db_p), uri(std::move(uri_p)), connection_id(std::move(connection_id_p)), quack_version(quack_version_p),
-      serenedb_peer(serenedb_peer_p), heartbeat_timeout_seconds(heartbeat_timeout_seconds_p),
+      wire_version(wire_version_p), heartbeat_timeout_seconds(heartbeat_timeout_seconds_p),
       max_connections_cached(max_connections_cached_p) {
 	if (client_p) {
 		StoreClient(std::move(client_p));
@@ -423,14 +425,18 @@ shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &co
 	}
 	auto accepted_heartbeat_timeout_seconds = connection_request_response->HeartbeatTimeoutSeconds();
 	ValidateHeartbeatTimeout(accepted_heartbeat_timeout_seconds);
+	// a SereneDB server names the version it agreed on, and this side checks it reads that version too
+	auto serenedb_version = connection_request_response->SereneDBStorageVersion();
+	auto wire_version = serenedb_version ? QuackSereneDBWireVersion(serenedb_version)
+	                                     : QuackDuckDBWireVersion(connection_request_response->ServerVersion());
 	// success! we got a connection id
 	auto connection_id = connection_request_response->ConnectionId();
 	// Cache at most one client per async send slot: pending SEND_DATA tasks can check out far more
 	// clients than ever POST concurrently, and each cached client pins a server connection slot.
 	idx_t pool_size = MaxValue<idx_t>(1, (idx_t)TaskScheduler::GetScheduler(context).NumberOfAsyncThreads());
 	return make_shared_ptr<QuackClientConnection>(*context.db, std::move(client), server_uri, std::move(connection_id),
-	                                              quack_version, connection_request_response->SereneDB(),
-	                                              accepted_heartbeat_timeout_seconds, pool_size);
+	                                              quack_version, wire_version, accepted_heartbeat_timeout_seconds,
+	                                              pool_size);
 }
 
 unique_ptr<QuackClient> QuackClientConnection::TakeClient(optional_ptr<ClientContext> context) const {

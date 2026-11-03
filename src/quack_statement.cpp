@@ -178,7 +178,7 @@ void QuackStatementRunner::SendLastResult() {
 			continue;
 		}
 		if (!writer) {
-			writer = make_uniq<QuackChunkPayloadWriter>(0, stream->serenedb_peer);
+			writer = make_uniq<QuackChunkPayloadWriter>(0, stream->wire_version);
 		}
 		writer->AppendChunk(*chunk);
 		rows += chunk->size();

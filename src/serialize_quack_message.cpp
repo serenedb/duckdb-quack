@@ -56,7 +56,7 @@ void ConnectionResponseMessage::Serialize(Serializer &serializer) const {
 	serializer.WritePropertyWithDefault<string>(2, "server_platform", server_platform);
 	serializer.WritePropertyWithDefault<idx_t>(3, "quack_version", quack_version);
 	serializer.WritePropertyWithDefault<idx_t>(4, "heartbeat_timeout_seconds", heartbeat_timeout_seconds);
-	serializer.WritePropertyWithDefault<bool>(16389, "serenedb", serenedb, false);
+	serializer.WritePropertyWithDefault<idx_t>(16389, "serenedb_storage_version", serenedb_storage_version, 0);
 }
 
 unique_ptr<ConnectionResponseMessage> ConnectionResponseMessage::Deserialize(Deserializer &deserializer) {
@@ -65,7 +65,7 @@ unique_ptr<ConnectionResponseMessage> ConnectionResponseMessage::Deserialize(Des
 	deserializer.ReadPropertyWithDefault<string>(2, "server_platform", result->server_platform);
 	deserializer.ReadPropertyWithDefault<idx_t>(3, "quack_version", result->quack_version);
 	deserializer.ReadPropertyWithDefault<idx_t>(4, "heartbeat_timeout_seconds", result->heartbeat_timeout_seconds);
-	deserializer.ReadPropertyWithExplicitDefault<bool>(16389, "serenedb", result->serenedb, false);
+	deserializer.ReadPropertyWithExplicitDefault<idx_t>(16389, "serenedb_storage_version", result->serenedb_storage_version, 0);
 	return result;
 }
 
