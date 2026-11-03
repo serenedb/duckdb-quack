@@ -1,6 +1,7 @@
 #include "duckdb/catalog/catalog_transaction.hpp"
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/common/fault_points.hpp"
 #include "duckdb/common/random_engine.hpp"
 #include "duckdb/common/time_point.hpp"
 #include "duckdb/main/database.hpp"
@@ -320,6 +321,9 @@ void QuackClientConnection::SendHeartbeat() const {
 	if (closed) {
 		return;
 	}
+	SDB_IF_FAILURE("quack_heartbeat_paused") {
+		return;
+	}
 	auto client = TakeClient(nullptr);
 	client->SetOwnerConnection(this);
 	client->Request<SuccessResponse>(nullptr, make_uniq<HeartbeatRequestMessage>(connection_id),
@@ -476,7 +480,8 @@ void QuackClient::NoteError(const ErrorResponse &error_response) {
 	if (error_response.MustInvalidate()) {
 		owner_connection->MarkServerInvalidated();
 	}
-	if (error_response.Error().RawMessage() == QUACK_INVALID_CONNECTION_ID) {
+	auto &message = error_response.Error().RawMessage();
+	if (message == QUACK_INVALID_CONNECTION_ID || message == QUACK_LEASE_EXPIRED) {
 		owner_connection->MarkLost();
 	}
 }
