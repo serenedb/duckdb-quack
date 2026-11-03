@@ -15,16 +15,16 @@
 #include <queue>
 namespace duckdb {
 
-//! Run the query of `bind_data` on the server, or with `describe_only` ask for its columns only
+//! Run `query` for `bind_data` on `connection`, or with `describe_only` ask for its columns only
 static unique_ptr<PrepareResponseMessage> RunRemoteQuery(ClientContext &context, QuackScanBindData &bind_data,
+                                                         QuackClientConnection &connection, string query,
                                                          hugeint_t query_uuid, bool describe_only = false) {
 	if (bind_data.use_transaction) {
 		QuackTransaction::Get(context, QuackCatalog::GetQuackCatalog(context, bind_data.catalog_name)).ForceStart();
 	}
-	auto &client_connection = *bind_data.client_connection;
-	auto prepare = client_connection.MakePrepare(bind_data.query, query_uuid);
+	auto prepare = connection.MakePrepare(std::move(query), query_uuid);
 	prepare->SetDescribeOnly(describe_only);
-	return client_connection.Prepare(context, std::move(prepare));
+	return connection.Prepare(context, std::move(prepare));
 }
 
 //! The query was a statement pushed down by the RemotePushdownOptimizer, and the server ran it (PREPARE runs the
@@ -39,7 +39,8 @@ static void BindRemoteQuery(ClientContext &context, QuackScanBindData &bind_data
                             vector<Identifier> &names) {
 	bind_data.query_uuid = UUID::GenerateRandomUUID();
 	auto describe = bind_data.client_connection->SereneDBPeer();
-	auto bind_response = RunRemoteQuery(context, bind_data, bind_data.query_uuid, describe);
+	auto bind_response = RunRemoteQuery(context, bind_data, *bind_data.client_connection, bind_data.query,
+	                                    bind_data.query_uuid, describe);
 	bind_data.bind_statement = bind_data.client_connection->StatementsStarted();
 
 	return_types = bind_response->Types();
@@ -332,18 +333,9 @@ unique_ptr<GlobalTableFunctionState> QuackScanInitGlobal(ClientContext &context,
 	// "FROM <table>" on an empty column_indexes.
 	auto pushdown_type = table_scan && !input.column_indexes.empty() ? ChunkResultPushdownType::PUSHDOWN_ALREADY_APPLIED
 	                                                                 : ChunkResultPushdownType::REQUIRES_PUSHDOWN;
-	string query;
-	if (table_scan) {
-		query = BuildPushdownQuery(bind_data, input);
-	} else {
-		if (bind_data.use_transaction) {
-			auto catalog_name = bind_data.catalog_name;
-			QuackTransaction::Get(context, QuackCatalog::GetQuackCatalog(context, catalog_name)).ForceStart();
-		}
-		query = bind_data.query;
-	}
+	auto query = table_scan ? BuildPushdownQuery(bind_data, input) : bind_data.query;
 	auto query_uuid = UUID::GenerateRandomUUID();
-	auto response = connection->Prepare(context, connection->MakePrepare(std::move(query), query_uuid));
+	auto response = RunRemoteQuery(context, bind_data, *connection, std::move(query), query_uuid);
 	if (!table_scan) {
 		if (response->Types() != bind_data.column_types) {
 			throw InvalidInputException("The result of the remote query \"%s\" changed its types since it was bound",

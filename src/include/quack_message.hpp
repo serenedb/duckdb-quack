@@ -7,6 +7,7 @@
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/common/types/uuid.hpp"
 #include "duckdb/common/error_data.hpp"
+#include "duckdb/storage/storage_info.hpp"
 
 namespace duckdb {
 
@@ -21,10 +22,19 @@ static constexpr const char *QUACK_LEASE_EXPIRED = "Connection heartbeat lease e
 //! handshake.
 static constexpr idx_t QUACK_MIN_VERSION = 3;
 static constexpr idx_t QUACK_VERSION = 3;
-//! A SereneDB client sends this header with its CONNECTION_REQUEST, which other servers ignore. A SereneDB server
-//! answers it with ConnectionResponseMessage::SereneDB, and from then on both send the SereneDB fields: the ones
-//! numbered from 16384 on, which other peers would refuse.
+//! A SereneDB client sends this header with its CONNECTION_REQUEST, which other servers ignore. It holds the newest
+//! storage version the client writes, in its on-disk form. A SereneDB server answers with the newest version both
+//! read (ConnectionResponseMessage::SereneDBStorageVersion), and the session writes that version from then on: its
+//! data, and the SereneDB fields numbered from 16384 on, which other peers would refuse.
 static constexpr const char *QUACK_SERENEDB_HEADER = "X-SereneDB-Quack";
+
+//! The value of QUACK_SERENEDB_HEADER this build sends
+string QuackSereneDBHeader();
+//! The storage version a session with a SereneDB peer writes: the newest one both read. `peer_version` is the
+//! peer's newest storage version in its on-disk form. Throws when this build reads none of the peer's versions.
+StorageVersion QuackSereneDBWireVersion(idx_t peer_version);
+//! The storage version a session with a DuckDB peer of `peer_duckdb_version` writes: the newest one both read
+StorageVersion QuackDuckDBWireVersion(const string &peer_duckdb_version);
 
 //! Upper bound both peers enforce on the heartbeat lease timeout
 static constexpr idx_t MAX_HEARTBEAT_TIMEOUT_SECONDS = static_cast<idx_t>(NumericLimits<int64_t>::Maximum() / 1000);
@@ -87,8 +97,8 @@ struct MessageHeader {
 
 class QuackMessage {
 public:
-	//! `serenedb_peer`: the receiver is a SereneDB one, so the SereneDB fields may go out
-	virtual void ToMemoryStream(MemoryStream &write_stream, bool serenedb_peer) const;
+	//! `wire_version`: the storage version of the session, which decides the format and the fields that go out
+	virtual void ToMemoryStream(MemoryStream &write_stream, StorageVersion wire_version) const;
 	static unique_ptr<QuackMessage> FromMemoryStream(MemoryStream &read_stream);
 
 	//! A serialized payload instead of a body. The HTTP layer sends these bytes as they are. It is
@@ -338,12 +348,13 @@ public:
 	idx_t HeartbeatTimeoutSeconds() const {
 		return heartbeat_timeout_seconds;
 	}
-	//! The server is a SereneDB one, and the client asked with QUACK_SERENEDB_HEADER
-	void SetSereneDB(bool serenedb_p) {
-		serenedb = serenedb_p;
+	//! The session's storage version in its on-disk form, for a client that sent QUACK_SERENEDB_HEADER to a
+	//! SereneDB server. 0 otherwise.
+	void SetSereneDBStorageVersion(idx_t serenedb_storage_version_p) {
+		serenedb_storage_version = serenedb_storage_version_p;
 	}
-	bool SereneDB() const {
-		return serenedb;
+	idx_t SereneDBStorageVersion() const {
+		return serenedb_storage_version;
 	}
 
 	void Serialize(Serializer &serializer) const override;
@@ -354,7 +365,7 @@ private:
 	string server_platform;
 	idx_t quack_version;
 	idx_t heartbeat_timeout_seconds;
-	bool serenedb = false;
+	idx_t serenedb_storage_version = 0;
 };
 
 class FetchRequestMessage : public QuackMessage {
@@ -503,8 +514,8 @@ static constexpr idx_t QUACK_PAYLOAD_HEADER_BYTES = 256;
 class QuackChunkPayloadWriter {
 public:
 	//! capacity_hint is the previous payload's size. It is reserved, so a steady stream never grows.
-	//! `serenedb_peer`: the receiver is a SereneDB one, so the chunks are written in its format
-	QuackChunkPayloadWriter(idx_t capacity_hint, bool serenedb_peer);
+	//! `wire_version`: the storage version the chunks are written in, the session's
+	QuackChunkPayloadWriter(idx_t capacity_hint, StorageVersion wire_version);
 	~QuackChunkPayloadWriter();
 
 	//! The caller can reuse the chunk after this call.
@@ -530,7 +541,7 @@ private:
 
 //! Writes the header back-aligned into the free space, so it ends where the blob starts. Returns
 //! where the wire body starts. (A fixed-width header would also align the blob, for zero-copy.)
-idx_t QuackPrependHeader(MemoryStream &payload, const QuackMessage &header_message, bool serenedb_peer);
+idx_t QuackPrependHeader(MemoryStream &payload, const QuackMessage &header_message, StorageVersion wire_version);
 
 //! Reads chunk_count self-describing chunks: the mirror of QuackChunkPayloadWriter::AppendChunk.
 vector<unique_ptr<DataChunk>> DecodeQuackChunkBlob(BinaryDeserializer &deserializer, idx_t chunk_count);

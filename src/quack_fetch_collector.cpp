@@ -25,8 +25,8 @@ struct QuackPreparedFetchBatch : public QuackPreparedBatch {
 //! The accumulation buffer IS the wire body: the FETCH handler writes the header and replies.
 class QuackFetchFragmentBuilder : public QuackFragmentBuilder {
 public:
-	QuackFetchFragmentBuilder(idx_t size_hint, bool serenedb_peer)
-	    : writer(make_uniq<QuackChunkPayloadWriter>(size_hint, serenedb_peer)) {
+	QuackFetchFragmentBuilder(idx_t size_hint, StorageVersion wire_version)
+	    : writer(make_uniq<QuackChunkPayloadWriter>(size_hint, wire_version)) {
 	}
 
 	void Append(ClientContext &context, DataChunk &chunk) override {
@@ -68,7 +68,7 @@ public:
 	}
 
 	unique_ptr<QuackFragmentBuilder> OpenFragment(ClientContext &context, idx_t size_hint) override {
-		return make_uniq<QuackFetchFragmentBuilder>(size_hint, stream->serenedb_peer);
+		return make_uniq<QuackFetchFragmentBuilder>(size_hint, stream->wire_version);
 	}
 
 	//! NO_CAPACITY leaves the batch with the caller. A retry pushes the same batch again, which is

@@ -284,9 +284,9 @@
       },
       {
         "id": 16389,
-        "name": "serenedb",
-        "type": "bool",
-        "default": "false"
+        "name": "serenedb_storage_version",
+        "type": "idx_t",
+        "default": 0
       }
     ]
   },

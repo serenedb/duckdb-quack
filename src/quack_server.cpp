@@ -1,3 +1,4 @@
+#include "duckdb/common/operator/cast_operators.hpp"
 #include "duckdb/common/serializer/binary_deserializer.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/logging/logger.hpp"
@@ -404,8 +405,8 @@ void QuackServer::Finish(QuackRequest &request, unique_ptr<QuackMessage> respons
 		request.response_size = raw->GetPosition() - body_start;
 		return;
 	}
-	auto serenedb_client = request.connection ? request.connection->serenedb_client : request.serenedb_client;
-	request.response->ToMemoryStream(request.response_stream, serenedb_client);
+	auto wire_version = request.connection ? request.connection->wire_version : request.wire_version;
+	request.response->ToMemoryStream(request.response_stream, wire_version);
 	request.response_data = request.response_stream.GetData();
 	request.response_size = request.response_stream.GetPosition();
 }
@@ -535,11 +536,24 @@ shared_ptr<QuackConnection> QuackServer::OpenConnection(QuackRequest &request, Q
 	auto connection =
 	    make_shared_ptr<QuackConnection>(connection_id, heartbeat_timeout_seconds, std::move(host_session));
 	connection->live_caches = live_caches;
-	connection->serenedb_client = request.serenedb_client;
+	connection->wire_version = request.wire_version;
 	if (!connection_request_message.ClientId().empty()) {
 		connection->client_id_hash = ComputeClientHash(server_hmac_key, connection_request_message.ClientId());
 	}
 	return connection;
+}
+
+//! The storage version the session writes, the newest one this server and the client read
+static StorageVersion NegotiateWireVersion(const QuackRequest &request, const ConnectionRequestMessage &message) {
+	if (request.serenedb_header.empty()) {
+		return QuackDuckDBWireVersion(message.ClientVersion());
+	}
+	uint64_t client_version;
+	if (!TryCast::Operation(string_t(request.serenedb_header), client_version, true)) {
+		throw InvalidInputException("%s names no storage version: \"%s\"", QUACK_SERENEDB_HEADER,
+		                            request.serenedb_header);
+	}
+	return QuackSereneDBWireVersion(client_version);
 }
 
 unique_ptr<QuackMessage> QuackServer::Connect(QuackRequest &request, QuackServerHost &host) {
@@ -550,6 +564,7 @@ unique_ptr<QuackMessage> QuackServer::Connect(QuackRequest &request, QuackServer
 		    StringUtil::Format("Unsupported Quack version - server only supports versions %llu to %llu of quack",
 		                       QUACK_MIN_VERSION, QUACK_VERSION));
 	}
+	request.wire_version = NegotiateWireVersion(request, connection_request_message);
 	auto heartbeat_timeout_seconds = connection_request_message.HeartbeatTimeoutSeconds();
 	if (heartbeat_timeout_seconds == 0 || heartbeat_timeout_seconds > MAX_HEARTBEAT_TIMEOUT_SECONDS) {
 		return make_uniq<ErrorResponse>(StringUtil::Format(
@@ -585,7 +600,9 @@ unique_ptr<QuackMessage> QuackServer::Connect(QuackRequest &request, QuackServer
 	}
 	auto response =
 	    make_uniq<ConnectionResponseMessage>(connection_id, quack_version.GetIndex(), heartbeat_timeout_seconds);
-	response->SetSereneDB(request.serenedb_client);
+	if (IsSereneDBStorageVersion(request.wire_version)) {
+		response->SetSereneDBStorageVersion(StorageVersionToDisk(request.wire_version));
+	}
 	return std::move(response);
 }
 
@@ -619,7 +636,7 @@ static void StartStatement(QuackRequest &request, DatabaseInstance &db) {
 		connection.query_started_at = Timestamp::GetCurrentTimestamp();
 	}
 
-	request.stream = make_shared_ptr<QuackResultStream>(QuackServerStreamBufferBytes(db), connection.serenedb_client);
+	request.stream = make_shared_ptr<QuackResultStream>(QuackServerStreamBufferBytes(db), connection.wire_version);
 	// Internal catalog traffic carries uuid 0. It must never displace the client's retained result.
 	// A describe has no rows to keep
 	bool client_query = prepare_request_message.QueryUUID() != hugeint_t {0, 0};
@@ -667,7 +684,7 @@ static void TakeInlineBatch(QuackRequest &request, QuackFetchPayload &entry) {
 		FetchResponseMessage header_message;
 		header_message.SetChunkCount(entry.chunk_count);
 		header_message.SetBatchIndex(request.consumed);
-		auto body_start = QuackPrependHeader(*entry.payload, header_message, stream.serenedb_peer);
+		auto body_start = QuackPrependHeader(*entry.payload, header_message, stream.wire_version);
 		stream.Retain(request.consumed, std::move(entry.payload), body_start, entry.rows);
 	}
 }
@@ -825,7 +842,7 @@ static QuackClaimPopStatus ServeBatch(QuackResultStream &stream, idx_t dense_ind
 	FetchResponseMessage header_message;
 	header_message.SetChunkCount(entry.chunk_count);
 	header_message.SetBatchIndex(batch_index);
-	body_start = QuackPrependHeader(*entry.payload, header_message, stream.serenedb_peer);
+	body_start = QuackPrependHeader(*entry.payload, header_message, stream.wire_version);
 	payload = shared_ptr<MemoryStream>(std::move(entry.payload));
 	stream.served.emplace(dense_index, QuackResultStream::RetainedPayload {payload, body_start, entry.rows});
 	stream.retained_rows += entry.rows;
