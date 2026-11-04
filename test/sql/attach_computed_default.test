@@ -17,7 +17,11 @@ create table t_ts (ts timestamptz default current_timestamp, v integer);
 
 statement ok quack_db:quack_server_con
 insert into t_const default values;
+
+statement ok quack_db:quack_server_con
 insert into t_expr default values;
+
+statement ok quack_db:quack_server_con
 insert into t_ts (v) values (42);
 
 statement ok con2

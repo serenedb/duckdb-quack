@@ -209,16 +209,10 @@ statement ok quack_db:quack_server_con
 create schema bad_schema
 
 statement ok quack_db:quack_server_con
-create macro bad_schema.pos(x) as x > 0
+create type bad_schema.mood as enum ('happy', 'sad')
 
 statement ok quack_db:quack_server_con
-set search_path = 'bad_schema'
-
-statement ok quack_db:quack_server_con
-create table bad_schema.bad (i INT CHECK (pos(i)))
-
-statement ok quack_db:quack_server_con
-reset search_path
+create table bad_schema.bad (m bad_schema.mood)
 
 statement error
 CALL quack_clear_cache()
@@ -277,6 +271,10 @@ CALL quack_clear_cache()
 onlyif worker=1
 statement ok
 PREPARE p AS select i from rpc.t
+
+onlyif worker=1
+statement ok
+DEALLOCATE p
 
 endloop
 

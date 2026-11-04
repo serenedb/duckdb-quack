@@ -53,10 +53,6 @@ public:
 
 	unique_ptr<CreateInfo> GetInfo() const override;
 
-	optional_ptr<SchemaCatalogEntry> GetParentSchema() const override {
-		return parent_schema;
-	}
-
 	//! The schemas nested inside this schema
 	QuackCatalogSet &Schemas() {
 		return *schemas;
@@ -97,7 +93,6 @@ private:
 	optional_ptr<CatalogEntry> LoadBuiltInFunction(DefaultTableMacro macro);
 
 private:
-	optional_ptr<SchemaCatalogEntry> parent_schema;
 	int64_t remote_oid;
 	unique_ptr<QuackCatalogSet> schemas;
 	unique_ptr<QuackTableSet> tables;

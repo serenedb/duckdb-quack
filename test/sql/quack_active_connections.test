@@ -9,7 +9,7 @@ create table fuu as values(42, 43);
 
 # no connections yet
 query I
-select count(*) from quack_active_connections();
+select count(*) from (FROM quack_active_connections() WHERE connection_id <> '{harness}');
 ----
 0
 
@@ -18,7 +18,7 @@ statement ok
 attach {server} as rpc2 (token 'asdf');
 
 query I quack_db:quack_server_con
-select state from quack_active_connections();
+select state from (FROM quack_active_connections() WHERE connection_id <> '{harness}');
 ----
 finished
 
@@ -30,18 +30,18 @@ from quack_query_by_name('rpc2', 'SELECT * FROM fuu');
 42	43
 
 query I quack_db:quack_server_con
-select count(*) from quack_active_connections();
+select count(*) from (FROM quack_active_connections() WHERE connection_id <> '{harness}');
 ----
 1
 
 query I quack_db:quack_server_con
-select starts_with(query, 'SELECT') from quack_active_connections();
+select starts_with(query, 'SELECT') from (FROM quack_active_connections() WHERE connection_id <> '{harness}');
 ----
 true
 
 # client id hash is NULL, because there is no client id input
 query I quack_db:quack_server_con
-select client_id_hash from quack_active_connections();
+select client_id_hash from (FROM quack_active_connections() WHERE connection_id <> '{harness}');
 ----
 NULL
 
@@ -52,12 +52,12 @@ statement ok
 attach {server} as rpc3 (token 'asdf', client_id 'random_client_id');
 
 query I quack_db:quack_server_con
-select count(*) from quack_active_connections();
+select count(*) from (FROM quack_active_connections() WHERE connection_id <> '{harness}');
 ----
 2
 
 query I quack_db:quack_server_con
-SELECT count(*) FILTER (WHERE client_id_hash IS NOT NULL) from quack_active_connections();
+SELECT count(*) FILTER (WHERE client_id_hash IS NOT NULL) from (FROM quack_active_connections() WHERE connection_id <> '{harness}');
 ----
 1
 
@@ -69,7 +69,7 @@ SELECT lower(client_id_hash) NOT IN (
          sha256('random_client_id'),
          md5('asdf' || 'random_client_id'))
        AND length(client_id_hash) = 64
-  from quack_active_connections() WHERE client_id_hash IS NOT NULL;
+  from (FROM quack_active_connections() WHERE connection_id <> '{harness}') WHERE client_id_hash IS NOT NULL;
 ----
 true
 
@@ -79,7 +79,7 @@ statement ok
 attach {server} as rpc_distinct (token 'asdf', client_id 'a_different_client_id');
 
 query I quack_db:quack_server_con
-SELECT count(DISTINCT client_id_hash) FROM quack_active_connections() WHERE client_id_hash IS NOT NULL;
+SELECT count(DISTINCT client_id_hash) FROM (FROM quack_active_connections() WHERE connection_id <> '{harness}') WHERE client_id_hash IS NOT NULL;
 ----
 2
 
@@ -94,7 +94,7 @@ attach {server} as rpc4 (token 'asdf', client_id 'random_client_id');
 # two hashes MUST be equal.
 query II quack_db:quack_server_con
 SELECT count(*) FILTER (WHERE client_id_hash IS NOT NULL), count(DISTINCT client_id_hash)
-  FROM quack_active_connections() WHERE client_id_hash IS NOT NULL;
+  FROM (FROM quack_active_connections() WHERE connection_id <> '{harness}') WHERE client_id_hash IS NOT NULL;
 ----
 2	1
 
@@ -110,7 +110,7 @@ attach {server} as rpc5 (token 'asdf', client_id '');
 
 # rpc2 (no client_id) + rpc5 (empty client_id) -> both NULL -> zero non-NULL hashes
 query I quack_db:quack_server_con
-SELECT count(*) FILTER (WHERE client_id_hash IS NOT NULL) from quack_active_connections();
+SELECT count(*) FILTER (WHERE client_id_hash IS NOT NULL) from (FROM quack_active_connections() WHERE connection_id <> '{harness}');
 ----
 0
 
@@ -118,7 +118,7 @@ statement ok
 detach rpc5;
 
 query I quack_db:quack_server_con
-select count(*) from quack_active_connections();
+select count(*) from (FROM quack_active_connections() WHERE connection_id <> '{harness}');
 ----
 1
 
@@ -127,7 +127,7 @@ statement ok
 detach rpc2;
 
 query I quack_db:quack_server_con
-select count(*) from quack_active_connections();
+select count(*) from (FROM quack_active_connections() WHERE connection_id <> '{harness}');
 ----
 0
 

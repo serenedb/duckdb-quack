@@ -9,10 +9,10 @@
 #pragma once
 
 #include "duckdb/catalog/catalog.hpp"
+#include "duckdb/common/mutex.hpp"
 #include "storage/quack_schema.hpp"
+#include "quack_periodic_worker.hpp"
 #include "quack_uri.hpp"
-
-#include <condition_variable>
 
 namespace duckdb {
 
@@ -22,13 +22,17 @@ class QuackClientConnection;
 
 class QuackCatalog : public Catalog {
 public:
-	explicit QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri_p, ClientContext &context,
-	                      const string &token, string client_id, idx_t heartbeat_timeout_seconds);
+	explicit QuackCatalog(AttachedDatabase &db_p, const QuackUri &server_uri_p, ClientContext &context, string token,
+	                      string client_id, idx_t heartbeat_timeout_seconds);
 	~QuackCatalog() override;
 
 public:
 	string GetCatalogType() override {
 		return "quack";
+	}
+	//! The schema an unqualified name means on the server
+	optional<Identifier> GetDefaultSchema() const override {
+		return default_schema;
 	}
 	static QuackCatalog &GetQuackCatalog(ClientContext &context, Value &catalog_name);
 	static bool IsQuackScan(const string &name);
@@ -78,9 +82,12 @@ public:
 
 	unique_ptr<ColumnDataCollection> ExecuteCommandInternal(ClientContext &context, const string &query);
 	const QuackUri &GetServerUri();
-	const string &GetConnectionId();
 
-	shared_ptr<QuackClientConnection> GetClientConnection();
+	//! The server session of `context`. Every local session gets its own, so their statements and transactions
+	//! do not run into each other on the server.
+	shared_ptr<QuackClientConnection> GetClientConnection(ClientContext &context);
+	//! Forget the session of `context` if the server lost it, so the next statement opens a new one
+	void DropLostSession(ClientContext &context);
 
 	void Refresh(ClientContext &context);
 	void Invalidate();
@@ -98,15 +105,27 @@ private:
 	QuackSchemaSet &GetSchemas(ClientContext &context);
 	shared_ptr<QuackSchemaSet> AcquireSnapshot(ClientContext &context);
 	bool ServesOwnConnection(ClientContext &context);
+	void SendHeartbeats();
+	//! The lease the server gave the sessions: heartbeats come three times in it
+	idx_t LeaseSeconds();
 
 private:
-	shared_ptr<QuackClientConnection> client_connection;
+	QuackUri server_uri;
+	string token;
+	string client_id;
+	idx_t heartbeat_timeout_seconds;
+	//! Tells this ATTACH apart from the others in the sessions a local context holds
+	string attach_id;
+	mutex sessions_lock;
+	//! The sessions handed out, kept alive by one heartbeat for all of them
+	vector<weak_ptr<QuackClientConnection>> sessions;
+	QuackPeriodicWorker heartbeat;
 	mutex snapshot_lock;
-	std::condition_variable snapshot_loaded;
 	shared_ptr<QuackSchemaSet> snapshot;
 	idx_t invalidated_version = 0;
 	idx_t loaded_version = 0;
 	optional_ptr<ClientContext> loading_context;
+	Identifier default_schema = Identifier(DEFAULT_SCHEMA);
 };
 
 } // namespace duckdb

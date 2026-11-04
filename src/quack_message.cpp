@@ -22,7 +22,7 @@ string MessageTypeToString(MessageType type) {
 }
 
 template <>
-MessageType EnumUtil::FromString<MessageType>(const char *value) {
+MessageType EnumUtil::FromString<MessageType>(std::string_view value) {
 	if (StringUtil::Equals(value, "INVALID")) {
 		return MessageType::INVALID;
 	}
@@ -110,16 +110,42 @@ const char *EnumUtil::ToChars<MessageType>(MessageType value) {
 	}
 }
 
-//! One place for the wire format options, so the messages and the chunk blobs cannot diverge.
-static SerializationOptions QuackWireSerializationOptions() {
+string QuackSereneDBHeader() {
+	return to_string(StorageVersionToDisk(StorageVersion::SERENEDB_LATEST));
+}
+
+StorageVersion QuackSereneDBWireVersion(idx_t peer_version) {
+	auto peer = StorageVersionFromDisk(peer_version);
+	auto version = MinValue(peer, StorageVersion::SERENEDB_LATEST);
+	if (!IsSereneDBStorageVersion(peer) || !IsReadableStorageVersion(version)) {
+		throw InvalidInputException("The SereneDB peer writes storage version %s at newest, and this SereneDB reads "
+		                            "%s through %s",
+		                            StorageVersionInfo::GetStorageVersionString(peer),
+		                            StorageVersionInfo::GetStorageVersionString(SERENEDB_VERSION_LOWER),
+		                            StorageVersionInfo::GetStorageVersionString(SERENEDB_VERSION_UPPER));
+	}
+	return version;
+}
+
+StorageVersion QuackDuckDBWireVersion(const string &peer_duckdb_version) {
+	auto peer = GetStorageVersion(peer_duckdb_version.c_str());
+	// a DuckDB newer than the ones this build knows reads this build's newest version
+	if (peer == StorageVersion::INVALID || peer > StorageVersion::DUCKDB_LATEST) {
+		return StorageVersion::DUCKDB_LATEST;
+	}
+	return peer;
+}
+
+//! One place for the wire format options, so the messages and the chunk blobs cannot diverge
+static SerializationOptions QuackWireSerializationOptions(StorageVersion wire_version) {
 	SerializationOptions options;
-	options.storage_compatibility = StorageCompatibility::FromIndex(StorageVersion::V2_0_0);
+	options.storage_compatibility = StorageCompatibility::FromIndex(wire_version);
 	return options;
 }
 
-void QuackMessage::ToMemoryStream(MemoryStream &write_stream) const {
+void QuackMessage::ToMemoryStream(MemoryStream &write_stream, StorageVersion wire_version) const {
 	write_stream.Rewind();
-	BinarySerializer serializer(write_stream, QuackWireSerializationOptions());
+	BinarySerializer serializer(write_stream, QuackWireSerializationOptions(wire_version));
 
 	// write the header
 	serializer.Begin();
@@ -224,6 +250,11 @@ string ErrorResponse::ExceptionTypeName() const {
 	return Exception::ExceptionTypeToString(error.Type());
 }
 
+string ErrorResponse::TransferableMessage() const {
+	auto &message = error.RawMessage();
+	return message.substr(0, message.find("\n\nStack Trace:\n"));
+}
+
 unordered_map<string, string> ErrorResponse::TransferableExtraInfo() const {
 	return TransferableErrorInfo(error.ExtraInfo());
 }
@@ -263,13 +294,14 @@ ConnectionRequestMessage::ConnectionRequestMessage(const string &auth_string_p, 
                                                    idx_t heartbeat_timeout_seconds_p)
     : QuackMessage(TYPE), auth_string(auth_string_p), client_id(std::move(client_id_p)),
       client_duckdb_version(DuckDB::LibraryVersion()), client_platform(DuckDB::Platform()),
-      min_supported_quack_version(QUACK_VERSION), max_supported_quack_version(QUACK_VERSION),
+      min_supported_quack_version(QUACK_MIN_VERSION), max_supported_quack_version(QUACK_VERSION),
       heartbeat_timeout_seconds(heartbeat_timeout_seconds_p) {
 }
 
-ConnectionResponseMessage::ConnectionResponseMessage(string connection_id_p, idx_t heartbeat_timeout_seconds_p)
+ConnectionResponseMessage::ConnectionResponseMessage(string connection_id_p, idx_t quack_version_p,
+                                                     idx_t heartbeat_timeout_seconds_p)
     : QuackMessage(TYPE, std::move(connection_id_p)), server_duckdb_version(DuckDB::LibraryVersion()),
-      server_platform(DuckDB::Platform()), quack_version(QUACK_VERSION),
+      server_platform(DuckDB::Platform()), quack_version(quack_version_p),
       heartbeat_timeout_seconds(heartbeat_timeout_seconds_p) {
 }
 
@@ -286,12 +318,12 @@ unique_ptr<QuackMessage> QuackMessage::FromMemoryStream(MemoryStream &read_strea
 //===--------------------------------------------------------------------===//
 // QuackChunkPayloadWriter
 //===--------------------------------------------------------------------===//
-QuackChunkPayloadWriter::QuackChunkPayloadWriter(idx_t capacity_hint) {
+QuackChunkPayloadWriter::QuackChunkPayloadWriter(idx_t capacity_hint, StorageVersion wire_version) {
 	auto capacity = NextPowerOfTwo(MaxValue<idx_t>(capacity_hint, 65536));
 	stream = make_uniq<MemoryStream>(Allocator::DefaultAllocator(), capacity);
 	// The blob starts after the header space. The header itself is written at emit time.
 	stream->SetPosition(QUACK_PAYLOAD_HEADER_BYTES);
-	serializer = make_uniq<BinarySerializer>(*stream, QuackWireSerializationOptions());
+	serializer = make_uniq<BinarySerializer>(*stream, QuackWireSerializationOptions(wire_version));
 }
 
 QuackChunkPayloadWriter::~QuackChunkPayloadWriter() {
@@ -327,13 +359,13 @@ QuackChunkPayloadWriter::SealedPayload QuackChunkPayloadWriter::Seal() {
 //===--------------------------------------------------------------------===//
 // Chunk blob helpers
 //===--------------------------------------------------------------------===//
-idx_t QuackPrependHeader(MemoryStream &payload, const QuackMessage &header_message) {
+idx_t QuackPrependHeader(MemoryStream &payload, const QuackMessage &header_message, StorageVersion wire_version) {
 	// Only a buffer that QuackChunkPayloadWriter made has the header space.
 	D_ASSERT(payload.GetPosition() >= QUACK_PAYLOAD_HEADER_BYTES);
 	data_t scratch[QUACK_PAYLOAD_HEADER_BYTES];
 	// The non-owning scratch cannot grow: an oversized header throws instead of corrupting the blob.
 	MemoryStream scratch_stream(scratch, QUACK_PAYLOAD_HEADER_BYTES);
-	header_message.ToMemoryStream(scratch_stream);
+	header_message.ToMemoryStream(scratch_stream, wire_version);
 	auto header_size = scratch_stream.GetPosition();
 	auto body_start = QUACK_PAYLOAD_HEADER_BYTES - header_size;
 	memcpy(payload.GetData() + body_start, scratch, header_size);

@@ -18,12 +18,12 @@ attach {server} as rpc
 
 # Single table scan should work
 query I
-select count(i) from rpc.main.t1;
+select count(i) from rpc.{server_schema}.t1;
 ----
 100
 
 query I
-select count(j) from rpc.main.t2;
+select count(j) from rpc.{server_schema}.t2;
 ----
 200
 
@@ -31,7 +31,7 @@ select count(j) from rpc.main.t2;
 # connection_id during planning. The second PREPARE overwrites the first's
 # server-side query result, so the first table's scan fetches 0 rows.
 query II
-select count(t1.i), count(t2.j) from rpc.main.t1, rpc.main.t2;
+select count(t1.i), count(t2.j) from rpc.{server_schema}.t1, rpc.{server_schema}.t2;
 ----
 20000	20000
 

@@ -23,7 +23,7 @@ statement ok
 create schema s1.child.grandchild;
 
 query II
-select schema_name, parent_schema from duckdb_schemas() where database_name='rpc' order by all
+select schema_name, parent_schema from duckdb_schemas() where database_name='rpc' and schema_name not in ('information_schema', 'pg_catalog', 'public', 'memory') and parent_schema is distinct from 'memory' order by all
 ----
 child	s1
 grandchild	child
@@ -71,7 +71,7 @@ insert into memory.main.local_src select * from range(2000) t(i);
 query II
 explain insert into s1.child.t select * from memory.main.local_src
 ----
-physical_plan	<REGEX>:.*Quack Insert.*
+physical_plan	<REGEX>:.*QUACK_INSERT.*
 
 statement ok
 insert into s1.child.t select * from memory.main.local_src;
@@ -85,7 +85,7 @@ select count(*), sum(i) from s1.child.t
 query II
 explain create table s1.child.ctas as select i * 2 as d from memory.main.local_src
 ----
-physical_plan	<REGEX>:.*Quack Create Table As.*
+physical_plan	<REGEX>:.*QUACK_CREATE_TABLE_AS.*
 
 statement ok
 create table s1.child.ctas as select i * 2 as d from memory.main.local_src;

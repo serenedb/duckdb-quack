@@ -7,14 +7,34 @@
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/common/types/uuid.hpp"
 #include "duckdb/common/error_data.hpp"
+#include "duckdb/storage/storage_info.hpp"
 
 namespace duckdb {
 
 class BinaryDeserializer;
 class ClientContext;
 
-//! Quack wire-protocol version. Client and server agree on it during the connection handshake.
+//! The error of a request on a session the server does not know
+static constexpr const char *QUACK_INVALID_CONNECTION_ID = "Invalid connection id";
+//! The error of the request that finds its session's lease ran out, which ends the session
+static constexpr const char *QUACK_LEASE_EXPIRED = "Connection heartbeat lease expired";
+//! The Quack wire-protocol versions this build speaks. Client and server agree on one during the connection
+//! handshake.
+static constexpr idx_t QUACK_MIN_VERSION = 3;
 static constexpr idx_t QUACK_VERSION = 3;
+//! A SereneDB client sends this header with its CONNECTION_REQUEST, which other servers ignore. It holds the newest
+//! storage version the client writes, in its on-disk form. A SereneDB server answers with the newest version both
+//! read (ConnectionResponseMessage::SereneDBStorageVersion), and the session writes that version from then on: its
+//! data, and the SereneDB fields numbered from 16384 on, which other peers would refuse.
+static constexpr const char *QUACK_SERENEDB_HEADER = "X-SereneDB-Quack";
+
+//! The value of QUACK_SERENEDB_HEADER this build sends
+string QuackSereneDBHeader();
+//! The storage version a session with a SereneDB peer writes: the newest one both read. `peer_version` is the
+//! peer's newest storage version in its on-disk form. Throws when this build reads none of the peer's versions.
+StorageVersion QuackSereneDBWireVersion(idx_t peer_version);
+//! The storage version a session with a DuckDB peer of `peer_duckdb_version` writes: the newest one both read
+StorageVersion QuackDuckDBWireVersion(const string &peer_duckdb_version);
 
 //! Upper bound both peers enforce on the heartbeat lease timeout
 static constexpr idx_t MAX_HEARTBEAT_TIMEOUT_SECONDS = static_cast<idx_t>(NumericLimits<int64_t>::Maximum() / 1000);
@@ -40,7 +60,7 @@ enum class MessageType : uint8_t {
 template <>
 const char *EnumUtil::ToChars<MessageType>(MessageType value);
 template <>
-MessageType EnumUtil::FromString<MessageType>(const char *value);
+MessageType EnumUtil::FromString<MessageType>(std::string_view value);
 
 // workaround for wrong serialization functions signature on DataChunk :/
 // TODO: remove in 2.0
@@ -77,7 +97,8 @@ struct MessageHeader {
 
 class QuackMessage {
 public:
-	virtual void ToMemoryStream(MemoryStream &write_stream) const;
+	//! `wire_version`: the storage version of the session, which decides the format and the fields that go out
+	virtual void ToMemoryStream(MemoryStream &write_stream, StorageVersion wire_version) const;
 	static unique_ptr<QuackMessage> FromMemoryStream(MemoryStream &read_stream);
 
 	//! A serialized payload instead of a body. The HTTP layer sends these bytes as they are. It is
@@ -170,6 +191,14 @@ public:
 	optional_idx InlineRows() const {
 		return inline_rows;
 	}
+	//! Ask for the result's columns only: the server binds the statement and does not run it, unless it cannot
+	//! (see PrepareResponseMessage::DescribedOnly).
+	void SetDescribeOnly(bool describe_only_p) {
+		describe_only = describe_only_p;
+	}
+	bool DescribeOnly() const {
+		return describe_only;
+	}
 
 public:
 	const string &Query() const {
@@ -192,6 +221,7 @@ private:
 	string sql_query;
 	hugeint_t query_uuid;
 	optional_idx inline_rows;
+	bool describe_only = false;
 };
 
 class PrepareResponseMessage : public QuackMessage {
@@ -224,6 +254,14 @@ public:
 	hugeint_t QueryUUID() const {
 		return query_uuid;
 	}
+	//! A describe-only PREPARE that the server answered without running the statement: there are no rows.
+	//! False when the server ran it after all, such as for several statements in one PREPARE.
+	void SetDescribedOnly(bool described_only_p) {
+		described_only = described_only_p;
+	}
+	bool DescribedOnly() const {
+		return described_only;
+	}
 
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<PrepareResponseMessage> Deserialize(Deserializer &deserializer);
@@ -238,6 +276,7 @@ private:
 	vector<unique_ptr<DataChunkWrapper>> results;
 	bool needs_more_fetch = false;
 	hugeint_t query_uuid;
+	bool described_only = false;
 };
 
 class ConnectionRequestMessage : public QuackMessage {
@@ -260,10 +299,10 @@ public:
 	const string &ClientPlatform() const {
 		return client_platform;
 	}
-	const idx_t MinimumSupportedQuackVersion() const {
+	idx_t MinimumSupportedQuackVersion() const {
 		return min_supported_quack_version;
 	}
-	const idx_t MaximumSupportedQuackVersion() const {
+	idx_t MaximumSupportedQuackVersion() const {
 		return max_supported_quack_version;
 	}
 	idx_t HeartbeatTimeoutSeconds() const {
@@ -290,7 +329,7 @@ class ConnectionResponseMessage : public QuackMessage {
 public:
 	static constexpr MessageType TYPE = MessageType::CONNECTION_RESPONSE;
 
-	explicit ConnectionResponseMessage(string connection_id_p, idx_t heartbeat_timeout_seconds_p);
+	ConnectionResponseMessage(string connection_id_p, idx_t quack_version_p, idx_t heartbeat_timeout_seconds_p);
 
 protected:
 	ConnectionResponseMessage() : QuackMessage(TYPE) {
@@ -309,6 +348,14 @@ public:
 	idx_t HeartbeatTimeoutSeconds() const {
 		return heartbeat_timeout_seconds;
 	}
+	//! The session's storage version in its on-disk form, for a client that sent QUACK_SERENEDB_HEADER to a
+	//! SereneDB server. 0 otherwise.
+	void SetSereneDBStorageVersion(idx_t serenedb_storage_version_p) {
+		serenedb_storage_version = serenedb_storage_version_p;
+	}
+	idx_t SereneDBStorageVersion() const {
+		return serenedb_storage_version;
+	}
 
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<ConnectionResponseMessage> Deserialize(Deserializer &deserializer);
@@ -318,6 +365,7 @@ private:
 	string server_platform;
 	idx_t quack_version;
 	idx_t heartbeat_timeout_seconds;
+	idx_t serenedb_storage_version = 0;
 };
 
 class FetchRequestMessage : public QuackMessage {
@@ -466,7 +514,8 @@ static constexpr idx_t QUACK_PAYLOAD_HEADER_BYTES = 256;
 class QuackChunkPayloadWriter {
 public:
 	//! capacity_hint is the previous payload's size. It is reserved, so a steady stream never grows.
-	explicit QuackChunkPayloadWriter(idx_t capacity_hint);
+	//! `wire_version`: the storage version the chunks are written in, the session's
+	QuackChunkPayloadWriter(idx_t capacity_hint, StorageVersion wire_version);
 	~QuackChunkPayloadWriter();
 
 	//! The caller can reuse the chunk after this call.
@@ -492,7 +541,7 @@ private:
 
 //! Writes the header back-aligned into the free space, so it ends where the blob starts. Returns
 //! where the wire body starts. (A fixed-width header would also align the blob, for zero-copy.)
-idx_t QuackPrependHeader(MemoryStream &payload, const QuackMessage &header_message);
+idx_t QuackPrependHeader(MemoryStream &payload, const QuackMessage &header_message, StorageVersion wire_version);
 
 //! Reads chunk_count self-describing chunks: the mirror of QuackChunkPayloadWriter::AppendChunk.
 vector<unique_ptr<DataChunk>> DecodeQuackChunkBlob(BinaryDeserializer &deserializer, idx_t chunk_count);
@@ -638,6 +687,8 @@ public:
 	}
 	//! The exception type in its wire form (e.g. "Catalog"), empty if this response holds no error
 	string ExceptionTypeName() const;
+	//! The message without the stack trace an internal error carries (see IsTransferableErrorInfo)
+	string TransferableMessage() const;
 	//! The extra info minus the entries that only mean something in the process that raised the error
 	unordered_map<string, string> TransferableExtraInfo() const;
 

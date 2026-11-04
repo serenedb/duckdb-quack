@@ -44,7 +44,7 @@ SELECT i FROM remote2.t7 ORDER BY i;
 6
 
 query I quack_db:quack_server_con
-SELECT cached_rows FROM quack_active_connections() ORDER BY cached_rows;
+SELECT cached_rows FROM (FROM quack_active_connections() WHERE connection_id <> '{harness}') ORDER BY cached_rows;
 ----
 5
 7
@@ -63,7 +63,7 @@ SELECT i FROM remote.t5 ORDER BY i;
 4
 
 query I quack_db:quack_server_con
-SELECT cached_rows FROM quack_active_connections() ORDER BY cached_rows NULLS LAST;
+SELECT cached_rows FROM (FROM quack_active_connections() WHERE connection_id <> '{harness}') ORDER BY cached_rows NULLS LAST;
 ----
 7
 NULL
@@ -91,7 +91,7 @@ statement ok
 CALL quack_clear_cache();
 
 query I quack_db:quack_server_con
-SELECT cached_rows FROM quack_active_connections() ORDER BY cached_rows NULLS LAST;
+SELECT cached_rows FROM (FROM quack_active_connections() WHERE connection_id <> '{harness}') ORDER BY cached_rows NULLS LAST;
 ----
 5
 NULL

@@ -44,11 +44,12 @@ QuackTableSet::QuackTableSet(ClientContext &context, QuackSchemaCatalogEntry &pa
 				throw InternalException("Expected a CREATE TABLE");
 			}
 			auto remote_name = parent.GetRemoteName(info->GetQualifiedName().Name()).ToString();
-			// The server enforces foreign keys, and binding them would look up tables in the unregistered catalog
+			// The server enforces foreign keys and CHECKs, and binding them would look up names in the unregistered
+			// catalog
 			auto &table_info = info->Cast<CreateTableInfo>();
 			vector<unique_ptr<Constraint>> constraints;
 			for (auto &constraint : table_info.constraints) {
-				if (constraint->type != ConstraintType::FOREIGN_KEY) {
+				if (constraint->type != ConstraintType::FOREIGN_KEY && constraint->type != ConstraintType::CHECK) {
 					constraints.push_back(std::move(constraint));
 				}
 			}
@@ -103,18 +104,21 @@ string QuackTableSet::GetLoadQuery() {
 	return R"(
 SELECT schema_oid, sql, 'table'
 FROM duckdb_tables()
+WHERE NOT internal
 UNION ALL
 SELECT schema_oid, view_name, 'view'
 FROM duckdb_views()
+WHERE NOT internal
 	)";
 }
 
 TableFunction QuackTableCatalogEntry::GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data_p) {
 	auto &quack_catalog = catalog.Cast<QuackCatalog>();
 	auto bind_data = make_uniq<QuackScanBindData>();
-	bind_data->client_connection = quack_catalog.GetClientConnection();
+	bind_data->client_connection = quack_catalog.GetClientConnection(context);
+	bind_data->catalog_name = Value(quack_catalog.GetName().GetIdentifierName());
 	// the scan runs on the server: refer to the table the way the server sees it
-	bind_data->qualified_table_name = schema.Cast<QuackSchemaCatalogEntry>().GetRemoteName(name);
+	bind_data->qualified_table_name = QualifiedName(ParentSchemaPath(), name);
 	for (auto &col : GetColumns().Physical()) {
 		bind_data->column_names.emplace_back(col.Name());
 		bind_data->column_types.push_back(col.Type());

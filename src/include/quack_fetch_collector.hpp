@@ -8,18 +8,16 @@
 
 #pragma once
 
+#include "duckdb/common/atomic.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/serializer/memory_stream.hpp"
+#include "duckdb/execution/physical_operator.hpp"
+#include "duckdb/main/client_context.hpp"
+#include "duckdb/main/prepared_statement_data.hpp"
 
 #include "quack_claim_buffer.hpp"
 
-#include <condition_variable>
-
 namespace duckdb {
-
-class ClientContext;
-class PhysicalOperator;
-struct PreparedStatementData;
 
 //! One sealed FETCH_RESPONSE chunk blob. The serve path writes its header, with the client-visible
 //! index, directly before the blob.
@@ -36,19 +34,36 @@ using QuackFetchPayloadBuffer = QuackClaimBuffer<QuackFetchPayload>;
 //! Server state for one client-facing result. The fetch collector fills the claim buffer with sealed
 //! payloads, out of order and under a byte limit. The FETCH handlers drain it.
 struct QuackResultStream {
-	explicit QuackResultStream(idx_t capacity_bytes) : buffer(capacity_bytes) {
+	QuackResultStream(idx_t capacity_bytes, StorageVersion wire_version)
+	    : buffer(capacity_bytes), wire_version(wire_version) {
 	}
 
 	QuackFetchPayloadBuffer buffer;
+	//! The storage version of the client's session, which the payloads and their headers are written in
+	const StorageVersion wire_version;
 
-	void SignalBound(vector<LogicalType> types_p, vector<string> names_p) {
+	//! The statement's columns. With `described_only_p`, a describe-only PREPARE bound it and did not run it.
+	void SignalBound(vector<LogicalType> types_p, vector<string> names_p, bool described_only_p) {
 		{
 			lock_guard<mutex> guard(bind_lock);
 			types = std::move(types_p);
 			names = std::move(names_p);
+			described_only = described_only_p;
 			bound = true;
 		}
-		bind_cv.notify_all();
+		buffer.NotifyChange();
+	}
+
+	struct Columns {
+		vector<LogicalType> types;
+		vector<string> names;
+		bool described_only = false;
+	};
+
+	//! A copy of the columns: the statement may still bind while PREPARE answers
+	Columns GetColumns() {
+		lock_guard<mutex> guard(bind_lock);
+		return Columns {types, names, described_only};
 	}
 
 	//! A scan of this statement registered a client data stream. The statement gives no row until the
@@ -58,17 +73,7 @@ struct QuackResultStream {
 			lock_guard<mutex> guard(bind_lock);
 			client_data_pending = true;
 		}
-		bind_cv.notify_all();
-	}
-
-	//! true = the query is planned, or it waits for client data. false = it failed first. The buffer
-	//! then holds the error.
-	bool WaitBound() {
-		unique_lock<mutex> guard(bind_lock);
-		while (!bound && !client_data_pending && !buffer.HasError() && !buffer.Exhausted()) {
-			bind_cv.wait_for(guard, std::chrono::milliseconds(50));
-		}
-		return bound || client_data_pending;
+		buffer.NotifyChange();
 	}
 
 	bool Bound() {
@@ -76,12 +81,15 @@ struct QuackResultStream {
 		return bound;
 	}
 
-	vector<LogicalType> types;
-	vector<string> names;
-	bool client_data_pending = false;
+	//! The statement is planned, or it waits for client data: PREPARE can answer.
+	bool Answerable() {
+		lock_guard<mutex> guard(bind_lock);
+		return bound || client_data_pending;
+	}
+
 	//! The dense batches PREPARE consumed inline. FETCH subtracts this, so the client-facing indices
 	//! stay dense from 1. PREPARE writes it before the first FETCH arrives.
-	idx_t prepare_batches = 0;
+	atomic<idx_t> prepare_batches {0};
 	//! The dense batches the producer emitted. The terminal response carries it, so a short stream
 	//! fails instead of truncating.
 	optional_idx announced_total;
@@ -134,8 +142,11 @@ struct QuackResultStream {
 
 private:
 	mutex bind_lock;
-	std::condition_variable bind_cv;
 	bool bound = false;
+	bool client_data_pending = false;
+	vector<LogicalType> types;
+	vector<string> names;
+	bool described_only = false;
 };
 
 //! Installed in ClientConfig::get_result_collector, so the query runs in parallel into `stream`.

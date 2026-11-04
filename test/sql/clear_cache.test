@@ -14,7 +14,10 @@ statement ok
 attach {server} as rpc
 
 statement ok
-call system.main.quack_query_by_name('rpc', 'CREATE TABLE t1(i INTEGER); INSERT INTO t1 VALUES (1),(2),(3);')
+call system.main.quack_query_by_name('rpc', 'CREATE TABLE t1(i INTEGER)')
+
+statement ok
+call system.main.quack_query_by_name('rpc', 'INSERT INTO t1 VALUES (1),(2),(3)')
 
 statement error
 SELECT i FROM rpc.t1
@@ -32,7 +35,10 @@ SELECT i FROM rpc.t1 ORDER BY i
 3
 
 statement ok
-call system.main.quack_query_by_name('rpc', 'CREATE TABLE t2(s VARCHAR); INSERT INTO t2 VALUES (''a''),(''b'');')
+call system.main.quack_query_by_name('rpc', 'CREATE TABLE t2(s VARCHAR)')
+
+statement ok
+call system.main.quack_query_by_name('rpc', 'INSERT INTO t2 VALUES (''a''),(''b'')')
 
 statement error
 SELECT s FROM rpc.t2

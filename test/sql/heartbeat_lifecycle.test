@@ -9,7 +9,7 @@ statement ok
 CALL enable_logging('Quack');
 
 statement ok quack_db:quack_server_con
-CALL enable_logging('Quack');
+CALL enable_logging('Quack', storage = 'memory');
 
 statement ok
 ATTACH {server} AS heartbeat_client (token 'asdf', heartbeat_timeout 1);
@@ -18,7 +18,7 @@ ATTACH {server} AS heartbeat_client (token 'asdf', heartbeat_timeout 1);
 sleep 3 seconds
 
 query I quack_db:quack_server_con
-SELECT count(*) FROM quack_active_connections();
+SELECT count(*) FROM quack_active_connections() WHERE connection_id <> '{harness}';
 ----
 1
 
@@ -49,7 +49,7 @@ DETACH heartbeat_client;
 
 # Detach joins the worker and sends DISCONNECT before returning.
 query I quack_db:quack_server_con
-SELECT count(*) FROM quack_active_connections();
+SELECT count(*) FROM quack_active_connections() WHERE connection_id <> '{harness}';
 ----
 0
 

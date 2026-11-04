@@ -45,7 +45,7 @@ use rpc
 
 # --- the local schema tree mirrors the server's
 query II
-select schema_name, parent_schema from duckdb_schemas() where database_name='rpc' order by all
+select schema_name, parent_schema from duckdb_schemas() where database_name='rpc' and schema_name not in ('information_schema', 'pg_catalog', 'public', 'memory') and parent_schema is distinct from 'memory' order by all
 ----
 child	s1
 grandchild	child
@@ -54,7 +54,7 @@ s1	NULL
 
 # --- tables and views resolve through the nested path
 query I
-from main.top
+from {server_schema}.top
 ----
 1
 
@@ -80,7 +80,7 @@ query III
 select schema_name, table_name, database_name from duckdb_tables() where database_name='rpc' order by all
 ----
 child	leaf	rpc
-main	top	rpc
+{server_schema}	top	rpc
 s1	mid	rpc
 
 # a nested schema that does not exist
@@ -95,18 +95,18 @@ from s1.nope.leaf
 query II
 explain select count(*) from s1.child.leaf
 ----
-physical_plan	<REGEX>:.*Quack Query By Name.*
+physical_plan	<REGEX>:.*QUACK_QUERY_BY_NAME.*
 
 query II
 explain select count(*) from s1.child.leaf
 ----
-physical_plan	<!REGEX>:.*Seq Scan.*
+physical_plan	<!REGEX>:.*SEQ_SCAN.*
 
 # a table in a top-level schema is pushed down as a single remote query
 query II
 explain select count(*) from s1.mid
 ----
-physical_plan	<REGEX>:.*Quack Query By Name.*
+physical_plan	<REGEX>:.*QUACK_QUERY_BY_NAME.*
 
 # --- schema tree changes on the server are picked up by a cache refresh
 statement ok quack_db:quack_server_con
@@ -132,7 +132,7 @@ from s1.child.fresh_t
 7
 
 query II
-select schema_name, parent_schema from duckdb_schemas() where database_name='rpc' order by all
+select schema_name, parent_schema from duckdb_schemas() where database_name='rpc' and schema_name not in ('information_schema', 'pg_catalog', 'public', 'memory') and parent_schema is distinct from 'memory' order by all
 ----
 child	s1
 fresh	child

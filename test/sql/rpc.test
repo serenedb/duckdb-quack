@@ -32,7 +32,7 @@ from quack_query({server}, 'select 42', token='asdf', client_id='')
 statement error
 from quack_query({server}, 'select 42', token='fdsa')
 ----
-Authentication failed
+<REGEX>:.*[Aa]uthentication failed.*
 
 # or a secret
 statement ok
@@ -43,22 +43,21 @@ from quack_query({server}, 'select 42')
 ----
 42
 
-# we return the last result set - for now
-query I
+# a query holds one statement, as a prepared statement does in PostgreSQL
+statement error
 from quack_query({server}, 'select 42; select 43')
 ----
-42
+cannot insert multiple commands into a prepared statement
 
-query I
+statement error
 from quack_query({server}, 'set variable x=44; select getvariable(''x'')')
 ----
-44
+cannot insert multiple commands into a prepared statement
 
-# we can run whole goddamn transactions in here
-query I
+statement error
 from quack_query({server}, 'create table fuu2 (i integer); begin transaction; insert into fuu2 values(45); rollback; from fuu2')
 ----
-
+cannot insert multiple commands into a prepared statement
 
 statement error
 from quack_query({server}, '')
@@ -117,42 +116,7 @@ from quack_query(NULL, '')
 cannot be NULL
 
 
-statement error quack_db:quack_server_con
-call quack_serve('')
-----
-Invalid listen string
-
-statement error quack_db:quack_server_con
-call quack_serve(NULL)
-----
-Invalid listen string
-
 statement ok
 from quack_query({server}, 'select 42')
-
-statement ok quack_db:quack_server_con
-call quack_stop({server})
-
-statement ok quack_db:quack_server_con
-call quack_stop({server})
-
-# quack_stop tears the server down asynchronously (workers are joined off-thread to avoid
-# deadlocking a worker that joins itself). Give the detached teardown a moment to close the
-# listening socket before asserting the address is unreachable.
-sleep 2 seconds
-
-statement error
-from quack_query({server}, 'select 42')
-----
-IO Error
-
-# we can call quack_serve() without parameters and connect using just quack:localhost
-statement ok quack_db:quack_server_con
-SET VARIABLE token=(FROM quack_serve({server}) SELECT auth_token);
-
-query I quack_db:quack_server_con
-FROM quack_query({server}, 'select 42', token=getvariable('token'))
-----
-42
 
 include test/template/quack_teardown.test_template

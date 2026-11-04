@@ -16,7 +16,6 @@
 #include "storage/quack_optimizer.hpp"
 
 #include "storage/quack_catalog.hpp"
-#include "quack_active_connections.hpp"
 #include "quack_clear_cache.hpp"
 #include "quack_client.hpp"
 #include "quack_extension.hpp"
@@ -26,7 +25,7 @@
 #include "quack_scan_from_client.hpp"
 #include "quack_secret.hpp"
 #include "quack_cancel.hpp"
-#include "quack_startstop.hpp"
+#include "quack_active_connections.hpp"
 #include "quack_storage.hpp"
 #include "quack_uri.hpp"
 
@@ -37,6 +36,16 @@ static void ValidateHeartbeatTimeoutSetting(ClientContext &, SetScope, Value &pa
 		throw InvalidInputException("heartbeat_timeout cannot be null");
 	}
 	QuackClient::ValidateHeartbeatTimeout(parameter.GetValue<idx_t>());
+}
+
+//! A setting of the whole server: only who may manage the server changes it, RESET included
+static void RequireServerAccess(ClientContext &context, SetScope, Value &) {
+	QuackStorageExtensionInfo::CheckAccess(context, QuackAccess::SERVER);
+}
+
+static void ValidateServerHeartbeatTimeout(ClientContext &context, SetScope scope, Value &parameter) {
+	RequireServerAccess(context, scope, parameter);
+	ValidateHeartbeatTimeoutSetting(context, scope, parameter);
 }
 
 static unique_ptr<BaseSecret> CreateQuackSecretFromConfig(ClientContext &, CreateSecretInput &input) {
@@ -52,9 +61,6 @@ static unique_ptr<BaseSecret> CreateQuackSecretFromConfig(ClientContext &, Creat
 		} else if (lower_name == "extra_http_headers") {
 			// Stored as a MAP(VARCHAR, VARCHAR) Value; injected into every quack HTTP request.
 			secret->secret_map["extra_http_headers"] = named_param.second;
-		} else if (lower_name == "ssl_fingerprint") {
-			// validated here so a typo fails at CREATE SECRET rather than at the first connection
-			secret->secret_map["ssl_fingerprint"] = QuackUri::NormalizeFingerprint(named_param.second.ToString());
 		} else {
 			throw InvalidInputException("Unknown named parameter for quack secret: %s", lower_name);
 		}
@@ -74,37 +80,14 @@ static void RegisterQuackSecretType(ExtensionLoader &loader) {
 	CreateSecretFunction config_fun = {QuackSecret::TYPE, "config", CreateQuackSecretFromConfig};
 	config_fun.named_parameters["token"] = LogicalType::VARCHAR;
 	config_fun.named_parameters["extra_http_headers"] = LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR);
-	config_fun.named_parameters["ssl_fingerprint"] = LogicalType::VARCHAR;
 	loader.RegisterFunction(config_fun);
-}
-
-static bool TimingSafeEqual(const string &a, const string &b) {
-	if (a.size() != b.size()) {
-		return false;
-	}
-	volatile unsigned char result = 0;
-	for (size_t i = 0; i < a.size(); i++) {
-		result |= static_cast<unsigned char>(a[i]) ^ static_cast<unsigned char>(b[i]);
-	}
-	return result == 0;
-}
-
-// pass connection id
-static void QuackAuthToken(const DataChunk &args, ExpressionState &state, Vector &result) {
-	auto client_token = args.GetValue(1, 0).GetValue<string>();
-	auto server_token = args.GetValue(2, 0).GetValue<string>();
-
-	result.SetValue(0, Value::BOOLEAN(TimingSafeEqual(client_token, server_token)));
-}
-
-static void QuackDummyAuthorization(const DataChunk &args, ExpressionState &, Vector &result) {
-	result.SetValue(0, args.GetValue(1, 0)); // choose life
 }
 
 static void QuackConnectionIdFunc(const DataChunk &args, ExpressionState &state, Vector &result) {
 	auto catalog_name = args.GetValue(0, 0);
 	auto &quack_catalog = QuackCatalog::GetQuackCatalog(state.GetContext(), catalog_name);
-	result.SetValue(0, Value(quack_catalog.GetConnectionId()));
+	QuackStorageExtensionInfo::CheckAccess(state.GetContext(), QuackAccess::ATTACHED, quack_catalog.GetName());
+	result.SetValue(0, Value(quack_catalog.GetClientConnection(state.GetContext())->ConnectionId()));
 }
 
 static void QuackIdentifyFun(ClientContext &, TableFunctionInput &, DataChunk &) {
@@ -113,6 +96,7 @@ static void QuackIdentifyFun(ClientContext &, TableFunctionInput &, DataChunk &)
 
 static unique_ptr<FunctionData> QuackIdentifyBind(ClientContext &ctx, TableFunctionBindInput &input,
                                                   vector<LogicalType> &return_types, vector<Identifier> &names) {
+	QuackStorageExtensionInfo::CheckAccess(ctx, QuackAccess::SERVER);
 	auto &db_config = DBConfig::GetConfig(ctx);
 	for (auto &kv : input.named_parameters) {
 		if (kv.second.IsNull()) {
@@ -142,16 +126,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.SetDescription("The DuckDB 'Quack' Client/Server Protocol");
 
 	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
-	config.AddExtensionOption("quack_authentication_function", "Name of a callback function for authentication",
-	                          LogicalType::VARCHAR, Value("quack_check_token"), nullptr, SetScope::GLOBAL);
-	config.AddExtensionOption("quack_authorization_function", "Name of a callback function for authorization",
-	                          LogicalType::VARCHAR, Value("quack_nop_authorization"), nullptr, SetScope::GLOBAL);
-
 	config.AddExtensionOption("quack_prepare_inline_rows",
 	                          "Rows returned inline in the PREPARE response before the remainder is left to "
 	                          "FETCH; drains whole batches, so it may overshoot to a batch boundary",
-	                          LogicalType::UBIGINT, Value::UBIGINT(QUACK_PREPARE_INLINE_ROWS_DEFAULT), nullptr,
-	                          SetScope::GLOBAL);
+	                          LogicalType::UBIGINT, Value::UBIGINT(QUACK_PREPARE_INLINE_ROWS_DEFAULT),
+	                          RequireServerAccess, SetScope::GLOBAL);
 
 	config.AddExtensionOption("quack_fetch_read_ahead",
 	                          "FETCH requests kept in flight ahead of the scan (0 = number of async threads)",
@@ -195,16 +174,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("quack_server_stream_buffer_bytes",
 	                          "Server-side per-stream byte budget, at most a quarter of memory_limit: FETCH counts "
 	                          "serialized payload bytes, INSERT counts decoded chunk allocations; 0 disables the limit",
-	                          LogicalType::UBIGINT, Value::UBIGINT(QUACK_SERVER_STREAM_BUFFER_BYTES_DEFAULT), nullptr,
-	                          SetScope::GLOBAL);
-
-	config.AddExtensionOption("quack_server_max_connections",
-	                          "Maximum concurrent connections the RPC server accepts; beyond this new "
-	                          "connections are refused",
-	                          LogicalType::UBIGINT, Value::UBIGINT(1024), nullptr, SetScope::GLOBAL);
-	config.AddExtensionOption("quack_server_keep_alive_timeout",
-	                          "Seconds an idle keep-alive connection is kept open by the RPC server",
-	                          LogicalType::UBIGINT, Value::UBIGINT(300), nullptr, SetScope::GLOBAL);
+	                          LogicalType::UBIGINT, Value::UBIGINT(QUACK_SERVER_STREAM_BUFFER_BYTES_DEFAULT),
+	                          RequireServerAccess, SetScope::GLOBAL);
 
 	// Default client_id handed to any ATTACH / quack_query that doesn't pass one explicitly
 	string default_client_id;
@@ -216,24 +187,38 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("quack_default_client_id",
 	                          "client_id used when ATTACH / quack_query omit one; precomputed at load from "
 	                          "$QUACK_CLIENT_ID (empty opts out) or a random per-instance id. Set to '' to opt out.",
-	                          LogicalType::VARCHAR, Value(default_client_id), nullptr, SetScope::GLOBAL);
+	                          LogicalType::VARCHAR, Value(default_client_id), RequireServerAccess, SetScope::GLOBAL);
 	config.AddExtensionOption("quack_default_heartbeat_timeout",
 	                          "Heartbeat lease timeout in seconds requested by clients when ATTACH / quack_query "
 	                          "omit heartbeat_timeout",
 	                          LogicalType::UBIGINT, Value::UBIGINT(60), ValidateHeartbeatTimeoutSetting);
 
+	config.AddExtensionOption("quack_default_statement_timeout",
+	                          "Milliseconds a statement without statement_timeout may wait for a SereneDB Quack "
+	                          "server before it fails, so a server that is gone cannot hold it (0 = no limit)",
+	                          LogicalType::UBIGINT, Value::UBIGINT(QUACK_DEFAULT_STATEMENT_TIMEOUT_MS_DEFAULT));
+
+	config.AddExtensionOption("quack_max_heartbeat_timeout",
+	                          "Most seconds a server keeps a session without a request from its client; a client "
+	                          "asking for longer gets this",
+	                          LogicalType::UBIGINT, Value::UBIGINT(QUACK_MAX_HEARTBEAT_TIMEOUT_DEFAULT),
+	                          ValidateServerHeartbeatTimeout, SetScope::GLOBAL);
+
+	config.AddExtensionOption("quack_max_sessions", "Most sessions a server keeps open at once (0 = unlimited)",
+	                          LogicalType::UBIGINT, Value::UBIGINT(0), RequireServerAccess, SetScope::GLOBAL);
+
 	config.AddExtensionOption("quack_enable_reconnects",
 	                          "Enable reconnect support (clients acknowledge results, the server caches the last "
 	                          "result until acknowledged)",
-	                          LogicalType::BOOLEAN, Value::BOOLEAN(false), nullptr, SetScope::GLOBAL);
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(false), RequireServerAccess, SetScope::GLOBAL);
 
 	config.AddExtensionOption("quack_cache_max_rows",
 	                          "Maximum rows the server retains in the result cache (0 = unlimited)",
-	                          LogicalType::UBIGINT, Value::UBIGINT(100000), nullptr, SetScope::GLOBAL);
+	                          LogicalType::UBIGINT, Value::UBIGINT(100000), RequireServerAccess, SetScope::GLOBAL);
 
 	config.AddExtensionOption("quack_result_ttl",
 	                          "Seconds an idle cached result is kept before it is dropped (0 = never)",
-	                          LogicalType::UBIGINT, Value::UBIGINT(3600), nullptr, SetScope::GLOBAL);
+	                          LogicalType::UBIGINT, Value::UBIGINT(3600), RequireServerAccess, SetScope::GLOBAL);
 
 	// Process-wide fallback anchor for whoami().uptime when whoami_started_at isn't set.
 	// Stored as BIGINT epoch-microseconds to stay TZ-invariant regardless of ICU state.
@@ -259,20 +244,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	RegisterQuackSecretType(loader);
 
-	// the default authentication function
-	ScalarFunction quack_check_token("quack_check_token",
-	                                 {/* connection id */ LogicalType::VARCHAR, /* auth string */ LogicalType::VARCHAR,
-	                                  /* token */ LogicalType::VARCHAR},
-	                                 LogicalType::BOOLEAN, QuackAuthToken);
-	quack_check_token.SetVolatile();
-	loader.RegisterFunction(quack_check_token);
-
-	ScalarFunction rpc_authorization(
-	    "quack_nop_authorization", {/* connection id */ LogicalType::VARCHAR, /* query string */ LogicalType::VARCHAR},
-	    LogicalType::VARCHAR, QuackDummyAuthorization);
-	rpc_authorization.SetVolatile();
-	loader.RegisterFunction(rpc_authorization);
-
 	ScalarFunction quack_connection_id("quack_connection_id", {LogicalType::VARCHAR}, LogicalType::VARCHAR,
 	                                   QuackConnectionIdFunc);
 	quack_connection_id.SetVolatile();
@@ -281,22 +252,15 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(QuackScanFunction::GetFunction());
 	loader.RegisterFunction(QuackScanByNameFunction::GetFunction());
 	loader.RegisterFunction(QuackScanFromClientFunction::GetFunction());
-	loader.RegisterFunction(QuackServeFunction::GetFunction());
 	loader.RegisterFunction(QuackCancelFunction::GetFunction());
-	loader.RegisterFunction(QuackStopFunction::GetFunction());
-	loader.RegisterFunction(QuackServerListFunction::GetFunction());
-	loader.RegisterFunction(QuackGenerateKeysFunction::GetFunction());
 	loader.RegisterFunction(QuackClearCacheFunction::GetFunction());
 	loader.RegisterFunction(GetQuackIdentifyFunction());
 	loader.RegisterFunction(QuackActiveConnectionsFunction::GetFunction());
 
 	loader.RegisterFunction(QuackParseUriFunction::GetFunction());
 
-	// (ab)use storage extension info to store our state
-	auto ext = duckdb::make_shared_ptr<QuackStorageExtension>();
-	ext->storage_info = duckdb::make_uniq<QuackStorageExtensionInfo>();
-	StorageExtension::Register(loader.GetDatabaseInstance().config, QuackStorageExtensionInfo::STORAGE_EXTENSION_KEY,
-	                           ext);
+	StorageExtension::Register(loader.GetDatabaseInstance().config, QuackStorageExtension::STORAGE_EXTENSION_KEY,
+	                           duckdb::make_shared_ptr<QuackStorageExtension>());
 
 	// whoami() contract — register the table macro directly via the default-table-macro
 	// machinery so function resolution in the body is deferred to invocation time

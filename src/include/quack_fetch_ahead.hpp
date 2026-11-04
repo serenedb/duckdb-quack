@@ -65,9 +65,12 @@ private:
 private:
 	unique_ptr<ManagedAsyncTaskQueue> queue;
 	shared_ptr<QuackFetchBuffer> buffer;
+	shared_ptr<const QuackClientConnection> connection;
 	hugeint_t query_uuid;
 	string connection_id;
 	optional_idx client_query_id;
+	//! The query's ClientContext::query_deadline: a FETCH still running then fails with the query's timeout
+	optional_idx deadline;
 	//! Context logger captured on the creating thread; pool threads have no ClientContext.
 	shared_ptr<Logger> logger;
 	idx_t depth;
