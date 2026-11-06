@@ -87,7 +87,6 @@ shared_ptr<QuackClientConnection> QuackCatalog::GetClientConnection(ClientContex
 		return session;
 	}
 	auto session = QuackClient::ConnectToServer(context, server_uri, token, client_id, heartbeat_timeout_seconds);
-	session->StartHeartbeat();
 	{
 		lock_guard<mutex> guard(sessions_lock);
 		// drop the sessions whose local context ended, so the list stays as long as the live ones

@@ -101,6 +101,7 @@ public:
 	//! The token to connect with: `token`, or the one of the quack secret scoped to `uri`. Throws if there is none.
 	static string ResolveToken(ClientContext &context, const QuackUri &uri, string token);
 
+	//! A session on the server at `uri`, whose lease the connection keeps alive until it closes
 	static shared_ptr<QuackClientConnection> ConnectToServer(ClientContext &context, const QuackUri &uri, string token,
 	                                                         string client_id, idx_t heartbeat_timeout_seconds);
 
@@ -167,9 +168,6 @@ public:
 		return statements_started;
 	}
 
-	//! Keep the lease alive until the connection closes
-	void StartHeartbeat();
-
 	const string &ConnectionId() const {
 		return connection_id;
 	}
@@ -217,6 +215,8 @@ private:
 	friend class QuackClient;
 
 	unique_ptr<QuackClient> TakeClient(optional_ptr<ClientContext> context) const;
+	//! Keep the lease alive until the connection closes
+	void StartHeartbeat();
 	void SendHeartbeat() const;
 
 	DatabaseInstance &db;

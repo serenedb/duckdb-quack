@@ -104,7 +104,6 @@ static unique_ptr<FunctionData> QuackScanBind(ClientContext &context, TableFunct
 	    context, heartbeat_timeout_entry != input.named_parameters.end() ? &heartbeat_timeout_entry->second : nullptr);
 	bind_data->client_connection =
 	    QuackClient::ConnectToServer(context, server_uri, token, client_id, heartbeat_timeout);
-	bind_data->client_connection->StartHeartbeat();
 	bind_data->server_uri = server_uri;
 	bind_data->token = std::move(token);
 	bind_data->client_id = std::move(client_id);
@@ -277,10 +276,8 @@ static shared_ptr<QuackClientConnection> ScanConnection(ClientContext &context, 
 	}
 	lock_guard<mutex> guard(bind_data.connection_lock);
 	if (bind_data.client_connection->Lost()) {
-		auto connection = QuackClient::ConnectToServer(context, bind_data.server_uri, bind_data.token,
-		                                               bind_data.client_id, bind_data.heartbeat_timeout);
-		connection->StartHeartbeat();
-		bind_data.client_connection = std::move(connection);
+		bind_data.client_connection = QuackClient::ConnectToServer(context, bind_data.server_uri, bind_data.token,
+		                                                           bind_data.client_id, bind_data.heartbeat_timeout);
 	}
 	return bind_data.client_connection;
 }
