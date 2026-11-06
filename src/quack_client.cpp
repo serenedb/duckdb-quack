@@ -75,13 +75,16 @@ static void LoadExtraHttpHeaders(optional_ptr<ClientContext> context, DatabaseIn
 	}
 }
 
-void QuackClientConnection::CancelQuery(hugeint_t query_uuid) const {
+void QuackClientConnection::SendControl(unique_ptr<QuackMessage> message) const {
 	auto client = TakeClient(nullptr);
 	client->SetOwnerConnection(this);
-	client->Request<SuccessResponse>(nullptr, make_uniq<CancelRequestMessage>(connection_id, query_uuid),
-	                                 QuackControlDeadline());
+	client->Request<SuccessResponse>(nullptr, std::move(message), QuackControlDeadline());
 	client->SetOwnerConnection(nullptr);
 	StoreClient(std::move(client));
+}
+
+void QuackClientConnection::CancelQuery(hugeint_t query_uuid) const {
+	SendControl(make_uniq<CancelRequestMessage>(connection_id, query_uuid));
 }
 
 QuackClient::QuackClient(DatabaseInstance &db_p, const QuackUri &uri_p) : db(db_p), uri(uri_p) {
@@ -323,12 +326,7 @@ void QuackClientConnection::SendHeartbeat() const {
 	SDB_IF_FAILURE("quack_heartbeat_paused") {
 		return;
 	}
-	auto client = TakeClient(nullptr);
-	client->SetOwnerConnection(this);
-	client->Request<SuccessResponse>(nullptr, make_uniq<HeartbeatRequestMessage>(connection_id),
-	                                 QuackControlDeadline());
-	client->SetOwnerConnection(nullptr);
-	StoreClient(std::move(client));
+	SendControl(make_uniq<HeartbeatRequestMessage>(connection_id));
 }
 
 void QuackClient::ValidateClientId(const string &client_id) {

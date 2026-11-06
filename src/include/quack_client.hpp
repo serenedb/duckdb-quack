@@ -215,6 +215,8 @@ private:
 	friend class QuackClient;
 
 	unique_ptr<QuackClient> TakeClient(optional_ptr<ClientContext> context) const;
+	//! Send `message`, which no statement waits for, within QuackControlDeadline
+	void SendControl(unique_ptr<QuackMessage> message) const;
 	//! Keep the lease alive until the connection closes
 	void StartHeartbeat();
 	void SendHeartbeat() const;
