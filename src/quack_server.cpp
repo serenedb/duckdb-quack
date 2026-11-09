@@ -1,3 +1,4 @@
+#include "duckdb/common/fault_points.hpp"
 #include "duckdb/common/operator/cast_operators.hpp"
 #include "duckdb/common/serializer/binary_deserializer.hpp"
 #include "duckdb/common/types/timestamp.hpp"
@@ -30,37 +31,55 @@ static bool LeaseTimeoutElapsed(time_point<steady_clock> last_renewed_at, time_p
 	return static_cast<idx_t>(elapsed_seconds) >= timeout_seconds;
 }
 
-//! Stop the connection's statement if `matches` accepts its stream and query: error its stream, so the requests
-//! that wait on it and the producers parked on its capacity wake, and interrupt it. The host's driver then
-//! finishes it.
-template <class MATCHES>
-static bool AbortStatementIf(QuackConnection &connection, const string &reason, MATCHES &&matches) {
-	shared_ptr<QuackResultStream> stream;
-	{
-		annotated_lock_guard<annotated_mutex> guard(connection.statement.lock);
-		if (!matches(connection.statement.stream.get(), connection.statement.query_uuid)) {
-			return false;
-		}
-		stream = std::move(connection.statement.stream);
-		if (stream) {
-			// the abort reason must not hide a real failure
-			connection.statement.abort_error =
-			    stream->buffer.HasError() ? stream->buffer.GetError() : ErrorData(ExceptionType::INTERRUPT, reason);
-		}
-	}
+//! Error the statement's stream, so the requests that wait on it and the producers parked on its capacity wake, and
+//! interrupt it. The host's driver then finishes it. Under the statement lock, so a statement is stopped by the time
+//! the next one can be handed over.
+static void StopStatement(QuackConnection &connection, const shared_ptr<QuackResultStream> &stream,
+                          const string &reason) DUCKDB_REQUIRES(connection.statement.lock) {
 	// The statement can hold a scan that waits for a client batch. Error those streams too.
 	if (auto session_state = QuackSessionState::Get(connection.host_session->Context())) {
 		session_state->Streams().Clear(reason);
 	}
 	if (!stream) {
-		return true;
+		return;
 	}
 	auto was_finished = stream->buffer.Finished();
 	stream->buffer.SetError(ErrorData(ExceptionType::INTERRUPT, reason));
 	if (!was_finished) {
 		connection.host_session->Interrupt();
 	}
+}
+
+//! Stop the connection's statement if `matches` accepts its stream and query
+template <class MATCHES>
+static bool AbortStatementIf(QuackConnection &connection, const string &reason, MATCHES &&matches) {
+	annotated_lock_guard<annotated_mutex> guard(connection.statement.lock);
+	if (!matches(connection.statement.stream.get(), connection.statement.query_uuid)) {
+		return false;
+	}
+	auto stream = std::move(connection.statement.stream);
+	if (stream) {
+		// the abort reason must not hide a real failure
+		connection.statement.abort_error =
+		    stream->buffer.HasError() ? stream->buffer.GetError() : ErrorData(ExceptionType::INTERRUPT, reason);
+	}
+	StopStatement(connection, stream, reason);
 	return true;
+}
+
+//! Make `stream` the connection's statement and stop the one it replaces, in one step: of two PREPAREs at once, one
+//! stops the other's statement.
+static void ReplaceStatement(QuackConnection &connection, shared_ptr<QuackResultStream> stream, hugeint_t query_uuid,
+                             const string &reason) {
+	{
+		annotated_lock_guard<annotated_mutex> guard(connection.statement.lock);
+		auto previous = std::move(connection.statement.stream);
+		connection.statement.stream = std::move(stream);
+		connection.statement.query_uuid = query_uuid;
+		connection.statement.abort_error = ErrorData();
+		StopStatement(connection, previous, reason);
+	}
+	SDB_PARK_ONCE_ON_FAILURE("quack_statement_replaced_late");
 }
 
 static void AbortStatement(QuackConnection &connection, const string &reason) {
@@ -82,9 +101,12 @@ static bool ArmWaker(QuackRequest &request, BUFFER &buffer, const QuackWaker &wa
 }
 
 QuackConnection::QuackConnection(string connection_id_p, idx_t heartbeat_timeout_seconds_p,
-                                 unique_ptr<QuackHostSession> host_session_p)
-    : host_session(std::move(host_session_p)), connection_id(std::move(connection_id_p)),
-      heartbeat_timeout_seconds(heartbeat_timeout_seconds_p), lease_last_renewed_at(steady_clock::now()) {
+                                 StorageVersion wire_version_p, string client_id_hash_p,
+                                 shared_ptr<atomic<idx_t>> live_caches_p, unique_ptr<QuackHostSession> host_session_p)
+    : host_session(std::move(host_session_p)), live_caches(std::move(live_caches_p)),
+      connection_id(std::move(connection_id_p)), wire_version(wire_version_p),
+      client_id_hash(std::move(client_id_hash_p)), heartbeat_timeout_seconds(heartbeat_timeout_seconds_p),
+      lease_last_renewed_at(steady_clock::now()) {
 }
 
 QuackConnection::~QuackConnection() {
@@ -346,12 +368,8 @@ static string ComputeClientHash(const string &server_hmac_key, const string &cli
 	return QuackHexEncode(digest, duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_BYTES);
 }
 
-string QuackServer::GenerateConnectionId() {
-	auto db = db_ptr.lock();
-	if (!db) {
-		throw InternalException("Database was closed");
-	}
-	return QuackRandomToken(*db);
+string QuackServer::GenerateConnectionId(DatabaseInstance &db) {
+	return QuackRandomToken(db);
 }
 
 static bool ServerSupportsMessage(MessageType type) {
@@ -371,33 +389,36 @@ static bool ServerSupportsMessage(MessageType type) {
 }
 
 bool QuackServer::Handle(QuackRequest &request, QuackServerHost &host, const QuackWaker &waker) {
+	auto db = db_ptr.lock();
 	unique_ptr<QuackMessage> response;
-	try {
-		response = Dispatch(request, host, waker);
-	} catch (std::exception &ex) {
-		// The client reports a transport failure as "Failed to send message", so an error has to be a
-		// response instead.
-		response = make_uniq<ErrorResponse>(ErrorData(ex));
-	} catch (...) {
-		response = make_uniq<ErrorResponse>("Unknown error while handling request");
+	if (!db) {
+		response = make_uniq<ErrorResponse>("Database was closed");
+	} else {
+		try {
+			response = Dispatch(request, *db, host, waker);
+		} catch (std::exception &ex) {
+			// The client reports a transport failure as "Failed to send message", so an error has to be a
+			// response instead.
+			response = make_uniq<ErrorResponse>(ErrorData(ex));
+		} catch (...) {
+			response = make_uniq<ErrorResponse>("Unknown error while handling request");
+		}
 	}
 	if (!response) {
 		return false;
 	}
-	Finish(request, std::move(response));
+	Finish(request, db.get(), std::move(response));
 	return true;
 }
 
-void QuackServer::Finish(QuackRequest &request, unique_ptr<QuackMessage> response) {
+void QuackServer::Finish(QuackRequest &request, optional_ptr<DatabaseInstance> db, unique_ptr<QuackMessage> response) {
 	if (response->Type() == MessageType::ERROR_RESPONSE) {
 		// tell the client whether we are still usable - ask the database rather than guess from the exception
 		// type, it is the one that decides it has been invalidated
-		auto db = db_ptr.lock();
 		response->Cast<ErrorResponse>().SetMustInvalidate(!db || ValidChecker::IsInvalidated(*db));
 	}
-	request.phase = QuackRequest::Phase::DONE;
 	request.response = std::move(response);
-	LogRequest(request);
+	LogRequest(request, db);
 	if (auto raw = request.response->RawPayload()) {
 		// already serialized: the bytes go out as they are
 		auto body_start = request.response->RawPayloadStart();
@@ -411,8 +432,7 @@ void QuackServer::Finish(QuackRequest &request, unique_ptr<QuackMessage> respons
 	request.response_size = request.response_stream.GetPosition();
 }
 
-void QuackServer::LogRequest(QuackRequest &request) {
-	auto db = db_ptr.lock();
+void QuackServer::LogRequest(QuackRequest &request, optional_ptr<DatabaseInstance> db) {
 	if (!db || !request.message) {
 		return;
 	}
@@ -466,13 +486,10 @@ unique_ptr<QuackMessage> QuackServer::Decode(QuackRequest &request, DatabaseInst
 	return nullptr;
 }
 
-unique_ptr<QuackMessage> QuackServer::Dispatch(QuackRequest &request, QuackServerHost &host, const QuackWaker &waker) {
-	auto db = db_ptr.lock();
-	if (!db) {
-		return make_uniq<ErrorResponse>("Database was closed");
-	}
+unique_ptr<QuackMessage> QuackServer::Dispatch(QuackRequest &request, DatabaseInstance &db, QuackServerHost &host,
+                                               const QuackWaker &waker) {
 	if (request.phase == QuackRequest::Phase::DECODE) {
-		if (auto error = Decode(request, *db)) {
+		if (auto error = Decode(request, db)) {
 			return error;
 		}
 		request.phase = QuackRequest::Phase::START;
@@ -480,16 +497,16 @@ unique_ptr<QuackMessage> QuackServer::Dispatch(QuackRequest &request, QuackServe
 
 	switch (request.message->Type()) {
 	case MessageType::CONNECTION_REQUEST:
-		return Connect(request, host);
+		return Connect(request, db, host);
 	case MessageType::DISCONNECT_MESSAGE:
 		if (!Disconnect(request.connection->connection_id)) {
 			return make_uniq<ErrorResponse>("Connection does not exist / already disconnected");
 		}
 		return make_uniq<SuccessResponse>();
 	case MessageType::PREPARE_REQUEST:
-		return Prepare(request, waker);
+		return Prepare(request, db, waker);
 	case MessageType::FETCH_REQUEST:
-		return Fetch(request, waker);
+		return Fetch(request, db, waker);
 	case MessageType::SEND_DATA_REQUEST:
 		return SendData(request, waker);
 	case MessageType::CANCEL_REQUEST:
@@ -525,22 +542,19 @@ bool QuackServer::ReserveSession(idx_t max_sessions) {
 }
 
 //! A new session, with its SQL session on the host
-shared_ptr<QuackConnection> QuackServer::OpenConnection(QuackRequest &request, QuackServerHost &host,
-                                                        idx_t heartbeat_timeout_seconds) {
+shared_ptr<QuackConnection> QuackServer::OpenConnection(QuackRequest &request, DatabaseInstance &db,
+                                                        QuackServerHost &host, idx_t heartbeat_timeout_seconds) {
 	auto &connection_request_message = request.message->Cast<ConnectionRequestMessage>();
-	auto connection_id = GenerateConnectionId();
+	auto connection_id = GenerateConnectionId(db);
 	auto host_session = host.OpenSession(connection_id, connection_request_message);
 	// scan_data_from_quack_client registers its streams here, and SEND_DATA finds them by connection.
 	host_session->Context().registered_state->Insert(QuackSessionState::KEY,
 	                                                 make_shared_ptr<QuackSessionState>(connection_id));
-	auto connection =
-	    make_shared_ptr<QuackConnection>(connection_id, heartbeat_timeout_seconds, std::move(host_session));
-	connection->live_caches = live_caches;
-	connection->wire_version = request.wire_version;
-	if (!connection_request_message.ClientId().empty()) {
-		connection->client_id_hash = ComputeClientHash(server_hmac_key, connection_request_message.ClientId());
-	}
-	return connection;
+	auto client_id_hash = connection_request_message.ClientId().empty()
+	                          ? string()
+	                          : ComputeClientHash(server_hmac_key, connection_request_message.ClientId());
+	return make_shared_ptr<QuackConnection>(std::move(connection_id), heartbeat_timeout_seconds, request.wire_version,
+	                                        std::move(client_id_hash), live_caches, std::move(host_session));
 }
 
 //! The storage version the session writes, the newest one this server and the client read
@@ -556,7 +570,7 @@ static StorageVersion NegotiateWireVersion(const QuackRequest &request, const Co
 	return QuackSereneDBWireVersion(client_version);
 }
 
-unique_ptr<QuackMessage> QuackServer::Connect(QuackRequest &request, QuackServerHost &host) {
+unique_ptr<QuackMessage> QuackServer::Connect(QuackRequest &request, DatabaseInstance &db, QuackServerHost &host) {
 	auto &connection_request_message = request.message->Cast<ConnectionRequestMessage>();
 	auto quack_version = NegotiateQuackVersion(connection_request_message);
 	if (!quack_version.IsValid()) {
@@ -570,34 +584,27 @@ unique_ptr<QuackMessage> QuackServer::Connect(QuackRequest &request, QuackServer
 		return make_uniq<ErrorResponse>(StringUtil::Format(
 		    "heartbeat_timeout out of range - must be between 1 and %llu seconds", MAX_HEARTBEAT_TIMEOUT_SECONDS));
 	}
-	auto db = db_ptr.lock();
-	if (!db) {
-		return make_uniq<ErrorResponse>("Database was closed");
-	}
 	heartbeat_timeout_seconds =
 	    MinValue(heartbeat_timeout_seconds,
-	             QuackGetUBigintSetting(*db, "quack_max_heartbeat_timeout", QUACK_MAX_HEARTBEAT_TIMEOUT_DEFAULT));
-	auto max_sessions = QuackGetUBigintSetting(*db, "quack_max_sessions", 0);
+	             QuackGetUBigintSetting(db, "quack_max_heartbeat_timeout", QUACK_MAX_HEARTBEAT_TIMEOUT_DEFAULT));
+	auto max_sessions = QuackGetUBigintSetting(db, "quack_max_sessions", 0);
 	if (!ReserveSession(max_sessions)) {
 		return make_uniq<ErrorResponse>(
 		    StringUtil::Format("Too many Quack sessions: the server keeps at most %llu", max_sessions));
 	}
-	bool registered = false;
 	absl::Cleanup release_slot = [&] {
-		if (!registered) {
-			lock_guard<mutex> lock(active_connections_mutex);
-			opening_connections--;
-		}
+		lock_guard<mutex> lock(active_connections_mutex);
+		opening_connections--;
 	};
-	auto connection = OpenConnection(request, host, heartbeat_timeout_seconds);
+	auto connection = OpenConnection(request, db, host, heartbeat_timeout_seconds);
 	auto connection_id = connection->connection_id;
 	{
 		lock_guard<mutex> lock(active_connections_mutex);
 		D_ASSERT(active_connections.find(connection_id) == active_connections.end());
 		active_connections[connection_id] = std::move(connection);
 		opening_connections--;
-		registered = true;
 	}
+	std::move(release_slot).Cancel();
 	auto response =
 	    make_uniq<ConnectionResponseMessage>(connection_id, quack_version.GetIndex(), heartbeat_timeout_seconds);
 	if (IsSereneDBStorageVersion(request.wire_version)) {
@@ -620,22 +627,10 @@ static unique_ptr<QuackMessage> FailStatement(QuackRequest &request, const Error
 	return make_uniq<ErrorResponse>(error);
 }
 
-//! Stop the session's previous statement and hand the PREPARE's statement to the host, which runs it after
+//! Make the PREPARE's statement the session's one, stopping the previous, and hand it to the host
 static void StartStatement(QuackRequest &request, DatabaseInstance &db) {
 	auto &prepare_request_message = request.message->Cast<PrepareRequestMessage>();
 	auto &connection = *request.connection;
-	AbortStatement(connection, "superseded by a new query");
-	{
-		lock_guard<mutex> lock(connection.lock);
-		if (prepare_request_message.QueryUUID() != hugeint_t {0, 0}) {
-			// a new client query displaces the retained one, even if caching is now off
-			connection.ClearResultCache();
-		}
-		connection.sql_query = prepare_request_message.Query();
-		connection.query_state = QuackQueryState::ACTIVE;
-		connection.query_started_at = Timestamp::GetCurrentTimestamp();
-	}
-
 	request.stream = make_shared_ptr<QuackResultStream>(QuackServerStreamBufferBytes(db), connection.wire_version);
 	// Internal catalog traffic carries uuid 0. It must never displace the client's retained result.
 	// A describe has no rows to keep
@@ -645,11 +640,16 @@ static void StartStatement(QuackRequest &request, DatabaseInstance &db) {
 		// hold every served payload, instead of releasing it once the client acks
 		request.stream->RetainAll();
 	}
+	ReplaceStatement(connection, request.stream, prepare_request_message.QueryUUID(), "superseded by a new query");
 	{
-		annotated_lock_guard<annotated_mutex> guard(connection.statement.lock);
-		connection.statement.stream = request.stream;
-		connection.statement.query_uuid = prepare_request_message.QueryUUID();
-		connection.statement.abort_error = ErrorData();
+		lock_guard<mutex> lock(connection.lock);
+		if (client_query) {
+			// a new client query displaces the retained one, even if caching is now off
+			connection.ClearResultCache();
+		}
+		connection.sql_query = prepare_request_message.Query();
+		connection.query_state = QuackQueryState::ACTIVE;
+		connection.query_started_at = Timestamp::GetCurrentTimestamp();
 	}
 	auto &context = connection.host_session->Context();
 	// A statement that reads a client stream cannot bind its result before the client sends. The scan finds
@@ -722,13 +722,9 @@ static unique_ptr<QuackMessage> PrepareResponse(QuackRequest &request) {
 	return std::move(response);
 }
 
-unique_ptr<QuackMessage> QuackServer::Prepare(QuackRequest &request, const QuackWaker &waker) {
-	auto db = db_ptr.lock();
-	if (!db) {
-		return make_uniq<ErrorResponse>("Database was closed");
-	}
+unique_ptr<QuackMessage> QuackServer::Prepare(QuackRequest &request, DatabaseInstance &db, const QuackWaker &waker) {
 	if (request.phase == QuackRequest::Phase::START) {
-		StartStatement(request, *db);
+		StartStatement(request, db);
 		request.phase = QuackRequest::Phase::WAIT_BOUND;
 	}
 
@@ -745,7 +741,7 @@ unique_ptr<QuackMessage> QuackServer::Prepare(QuackRequest &request, const Quack
 				return nullptr;
 			}
 		}
-		request.phase = QuackRequest::Phase::DRAIN;
+		request.phase = QuackRequest::Phase::WAIT;
 	}
 
 	while (request.inline_rows < request.max_inline_rows) {
@@ -770,7 +766,7 @@ unique_ptr<QuackMessage> QuackServer::Prepare(QuackRequest &request, const Quack
 	}
 	stream.prepare_batches.store(request.consumed, std::memory_order_release);
 	if (request.retain_result) {
-		CacheResult(request, *db);
+		CacheResult(request, db);
 	}
 	return PrepareResponse(request);
 }
@@ -794,7 +790,7 @@ static void ReleaseAcked(QuackResultStream &stream, idx_t dense_ack) {
 static unique_ptr<QuackMessage> StartFetch(QuackRequest &request) {
 	auto &fetch_request_message = request.message->Cast<FetchRequestMessage>();
 	auto &connection = *request.connection;
-	// FETCH touches only the buffer and the served map, so it needs neither lock on the way in.
+	// FETCH takes the statement's stream under its lock, then touches only the buffer and the served map.
 	hugeint_t stream_uuid;
 	ErrorData abort_error;
 	{
@@ -861,16 +857,12 @@ static unique_ptr<QuackMessage> FetchEnd(QuackConnection &connection, QuackResul
 	return std::move(response);
 }
 
-unique_ptr<QuackMessage> QuackServer::Fetch(QuackRequest &request, const QuackWaker &waker) {
-	auto db = db_ptr.lock();
-	if (!db) {
-		return make_uniq<ErrorResponse>("Database was closed");
-	}
+unique_ptr<QuackMessage> QuackServer::Fetch(QuackRequest &request, DatabaseInstance &db, const QuackWaker &waker) {
 	if (request.phase == QuackRequest::Phase::START) {
 		if (auto error = StartFetch(request)) {
 			return error;
 		}
-		request.phase = QuackRequest::Phase::FETCH;
+		request.phase = QuackRequest::Phase::WAIT;
 	}
 
 	auto &stream = *request.stream;
@@ -881,7 +873,7 @@ unique_ptr<QuackMessage> QuackServer::Fetch(QuackRequest &request, const QuackWa
 		auto status = ServeBatch(stream, request.dense_index, batch_index, payload, body_start);
 		if (status == QuackClaimPopStatus::BATCH) {
 			// outside serve_lock, because the connection's state lock guards the cache
-			SyncResultCache(*request.connection, stream, *db);
+			SyncResultCache(*request.connection, stream, db);
 			return make_uniq<QuackRawPayloadResponse>(MessageType::FETCH_RESPONSE, std::move(payload), body_start);
 		}
 		if (status == QuackClaimPopStatus::ERRORED) {
@@ -951,22 +943,23 @@ unique_ptr<QuackMessage> QuackServer::SendData(QuackRequest &request, const Quac
 		}
 	}
 
-	if (request.phase == QuackRequest::Phase::START && !send_data_message.Chunks().empty()) {
-		if (!send_data_message.BatchIndex().IsValid()) {
+	auto &chunks = send_data_message.Chunks();
+	if (request.phase == QuackRequest::Phase::START) {
+		if (!chunks.empty() && !send_data_message.BatchIndex().IsValid()) {
 			return make_uniq<ErrorResponse>("send_data_request is missing its batch index");
 		}
 		try {
-			ValidateClientBatch(*stream, send_data_message.Chunks());
+			ValidateClientBatch(*stream, chunks);
 		} catch (std::exception &ex) {
 			ErrorData error(ex);
 			stream->buffer.SetError(error);
 			return make_uniq<ErrorResponse>(std::move(error));
 		}
-		if (!PushClientBatch(request, *stream, waker)) {
-			return nullptr;
-		}
+		request.phase = QuackRequest::Phase::WAIT;
 	}
-	request.phase = QuackRequest::Phase::SEND;
+	if (!chunks.empty() && !PushClientBatch(request, *stream, waker)) {
+		return nullptr;
+	}
 
 	if (!send_data_message.TotalBatches().IsValid()) {
 		if (stream->buffer.HasError()) {

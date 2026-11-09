@@ -34,7 +34,8 @@ public:
 	//! to start, whose statement its PREPARE stopped, and is dropped when it is Stopped already: a later PREPARE, a
 	//! cancel or the end of the session stopped it on its way. Must not wait for the statement.
 	virtual void Run(unique_ptr<QuackStatementRunner> runner) = 0;
-	//! Interrupt the running statement, and make its driver look at it again.
+	//! Interrupt the running statement, and make its driver look at it again. Called under the server's locks, so it
+	//! must not block or call back into the server.
 	virtual void Interrupt() = 0;
 };
 
@@ -72,7 +73,8 @@ struct QuackStatementState {
 };
 
 struct QuackConnection {
-	QuackConnection(string connection_id_p, idx_t heartbeat_timeout_seconds_p,
+	QuackConnection(string connection_id_p, idx_t heartbeat_timeout_seconds_p, StorageVersion wire_version_p,
+	                string client_id_hash_p, shared_ptr<atomic<idx_t>> live_caches_p,
 	                unique_ptr<QuackHostSession> host_session_p);
 	~QuackConnection();
 
@@ -88,10 +90,10 @@ struct QuackConnection {
 	//! Replay cache of the last client query's result stream, null unless quack_enable_reconnects.
 	unique_ptr<QuackResultCache> result_cache;
 	//! The owning server's live-cache counter, handed to every cache this connection creates.
-	shared_ptr<atomic<idx_t>> live_caches;
+	const shared_ptr<atomic<idx_t>> live_caches;
 	//! Rows held by result_cache
 	atomic<idx_t> cached_rows {DConstants::INVALID_INDEX};
-	string connection_id;
+	const string connection_id;
 
 	void SyncCachedRows() {
 		cached_rows = result_cache ? result_cache->retained_rows : DConstants::INVALID_INDEX;
@@ -108,11 +110,11 @@ struct QuackConnection {
 	bool cache_in_expiry_queue = false;
 
 	//! The storage version the session writes, which CONNECT agreed on with the client
-	StorageVersion wire_version = StorageVersion::DUCKDB_LATEST;
+	const StorageVersion wire_version;
 
 	//! Stable per-client reconnect key: HMAC-SHA256(server_hmac_key, client_id). Intentionally excludes
 	//! connection_id so it stays identical across (re)connections for the same client_id. Empty if no client_id.
-	string client_id_hash;
+	const string client_id_hash;
 
 	//! Heartbeat and lease variables
 	const idx_t heartbeat_timeout_seconds;
@@ -171,7 +173,8 @@ struct QuackRequest {
 		return response_size;
 	}
 
-	enum class Phase : uint8_t { DECODE, START, WAIT_BOUND, DRAIN, FETCH, SEND, DONE };
+	//! WAIT_BOUND: a PREPARE waits for its statement's columns. WAIT: the request waits on its stream.
+	enum class Phase : uint8_t { DECODE, START, WAIT_BOUND, WAIT };
 
 	ReadStream &body;
 	string serenedb_header;
@@ -223,20 +226,22 @@ public:
 	vector<QuackConnectionSnapshot> GetActiveConnectionSnap();
 
 private:
-	unique_ptr<QuackMessage> Dispatch(QuackRequest &request, QuackServerHost &host, const QuackWaker &waker);
+	unique_ptr<QuackMessage> Dispatch(QuackRequest &request, DatabaseInstance &db, QuackServerHost &host,
+	                                  const QuackWaker &waker);
 	unique_ptr<QuackMessage> Decode(QuackRequest &request, DatabaseInstance &db);
-	unique_ptr<QuackMessage> Connect(QuackRequest &request, QuackServerHost &host);
+	unique_ptr<QuackMessage> Connect(QuackRequest &request, DatabaseInstance &db, QuackServerHost &host);
 	bool ReserveSession(idx_t max_sessions);
-	shared_ptr<QuackConnection> OpenConnection(QuackRequest &request, QuackServerHost &host,
+	shared_ptr<QuackConnection> OpenConnection(QuackRequest &request, DatabaseInstance &db, QuackServerHost &host,
 	                                           idx_t heartbeat_timeout_seconds);
-	unique_ptr<QuackMessage> Prepare(QuackRequest &request, const QuackWaker &waker);
+	unique_ptr<QuackMessage> Prepare(QuackRequest &request, DatabaseInstance &db, const QuackWaker &waker);
 	void CacheResult(QuackRequest &request, DatabaseInstance &db);
-	unique_ptr<QuackMessage> Fetch(QuackRequest &request, const QuackWaker &waker);
+	unique_ptr<QuackMessage> Fetch(QuackRequest &request, DatabaseInstance &db, const QuackWaker &waker);
 	unique_ptr<QuackMessage> SendData(QuackRequest &request, const QuackWaker &waker);
 	unique_ptr<QuackMessage> Cancel(QuackRequest &request);
 	unique_ptr<QuackMessage> Acknowledge(QuackRequest &request);
-	void Finish(QuackRequest &request, unique_ptr<QuackMessage> response);
-	void LogRequest(QuackRequest &request);
+	//! `db` is null once the database was closed
+	void Finish(QuackRequest &request, optional_ptr<DatabaseInstance> db, unique_ptr<QuackMessage> response);
+	void LogRequest(QuackRequest &request, optional_ptr<DatabaseInstance> db);
 
 	shared_ptr<QuackConnection> GetConnection(const string &connection_id);
 	bool RenewConnectionLease(const string &connection_id, const shared_ptr<QuackConnection> &connection);
@@ -246,7 +251,7 @@ private:
 	void RequeueCacheSlots(vector<CacheExpiryEntry> &slots);
 	//! Give `connection` its expiry-queue slot when its cache is created; caller must hold connection.lock.
 	void RegisterCacheForExpiry(QuackConnection &connection);
-	string GenerateConnectionId();
+	string GenerateConnectionId(DatabaseInstance &db);
 
 	weak_ptr<DatabaseInstance> db_ptr;
 	string server_id;
