@@ -164,7 +164,7 @@ string QuackClient::PostRawLocked(const_data_ptr_t data, idx_t size, optional_id
 		string error = response ? response->GetError() : "no response";
 		throw IOException("Failed to send message: %s", error);
 	}
-	return std::move(post_request.buffer_out);
+	return std::move(response->body);
 }
 
 void QuackClient::EnsureHttpParams(optional_ptr<ClientContext> context) {
