@@ -634,7 +634,7 @@ static void StartStatement(QuackRequest &request, DatabaseInstance &db) {
 	request.stream = make_shared_ptr<QuackResultStream>(QuackServerStreamBufferBytes(db), connection.wire_version);
 	// Internal catalog traffic carries uuid 0. It must never displace the client's retained result.
 	// A describe has no rows to keep
-	bool client_query = prepare_request_message.QueryUUID() != hugeint_t {0, 0};
+	bool client_query = prepare_request_message.QueryUUID() != QUACK_INTERNAL_QUERY_UUID;
 	request.retain_result = client_query && !prepare_request_message.DescribeOnly() && ServerCachingEnabled(db);
 	if (request.retain_result) {
 		// hold every served payload, instead of releasing it once the client acks
@@ -981,8 +981,7 @@ unique_ptr<QuackMessage> QuackServer::SendData(QuackRequest &request, const Quac
 unique_ptr<QuackMessage> QuackServer::Cancel(QuackRequest &request) {
 	auto &cancel_request_message = request.message->Cast<CancelRequestMessage>();
 	auto &connection = *request.connection;
-	// {0,0} is a wildcard — cancel whatever query is running on this connection
-	bool is_wildcard = cancel_request_message.query_uuid == hugeint_t {0, 0};
+	bool is_wildcard = cancel_request_message.query_uuid == QUACK_ANY_QUERY_UUID;
 	hugeint_t active_query_uuid;
 	auto is_target = [&](const QuackResultStream *, hugeint_t query_uuid) {
 		active_query_uuid = query_uuid;

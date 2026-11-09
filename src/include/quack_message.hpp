@@ -18,6 +18,10 @@ class ClientContext;
 static constexpr const char *QUACK_INVALID_CONNECTION_ID = "Invalid connection id";
 //! The error of the request that finds its session's lease ran out, which ends the session
 static constexpr const char *QUACK_LEASE_EXPIRED = "Connection heartbeat lease expired";
+//! The query uuid of a PREPARE that is no client query, such as the client's own catalog lookups
+static constexpr hugeint_t QUACK_INTERNAL_QUERY_UUID {0, 0};
+//! A CANCEL for this query uuid stops whatever statement the session runs
+static constexpr hugeint_t QUACK_ANY_QUERY_UUID {0, 0};
 //! The Quack wire-protocol versions this build speaks. Client and server agree on one during the connection
 //! handshake.
 static constexpr idx_t QUACK_MIN_VERSION = 3;
