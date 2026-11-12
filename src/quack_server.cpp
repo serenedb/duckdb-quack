@@ -102,7 +102,7 @@ static bool ArmWaker(QuackRequest &request, BUFFER &buffer, const QuackWaker &wa
 
 QuackConnection::QuackConnection(string connection_id_p, idx_t heartbeat_timeout_seconds_p,
                                  StorageVersion wire_version_p, string client_id_hash_p,
-                                 shared_ptr<atomic<idx_t>> live_caches_p, unique_ptr<QuackHostSession> host_session_p)
+                                 shared_ptr<atomic<idx_t>> live_caches_p, shared_ptr<QuackHostSession> host_session_p)
     : host_session(std::move(host_session_p)), live_caches(std::move(live_caches_p)),
       connection_id(std::move(connection_id_p)), wire_version(wire_version_p),
       client_id_hash(std::move(client_id_hash_p)), heartbeat_timeout_seconds(heartbeat_timeout_seconds_p),
@@ -111,6 +111,7 @@ QuackConnection::QuackConnection(string connection_id_p, idx_t heartbeat_timeout
 
 QuackConnection::~QuackConnection() {
 	AbortStatement(*this, "connection closed during fetch");
+	host_session->Close();
 }
 
 bool QuackConnection::LeaseExpiredLocked(time_point<steady_clock> now) {

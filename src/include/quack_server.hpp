@@ -37,6 +37,8 @@ public:
 	//! Interrupt the running statement, and make its driver look at it again. Called under the server's locks, so it
 	//! must not block or call back into the server.
 	virtual void Interrupt() = 0;
+	//! The server dropped the session: run no further statement.
+	virtual void Close() = 0;
 };
 
 //! What the host gives one request: the session a CONNECTION opens, after it checked the credentials.
@@ -45,7 +47,7 @@ public:
 	virtual ~QuackServerHost() = default;
 
 	//! Throw to refuse the connection: the client gets the exception.
-	virtual unique_ptr<QuackHostSession> OpenSession(const string &connection_id,
+	virtual shared_ptr<QuackHostSession> OpenSession(const string &connection_id,
 	                                                 const ConnectionRequestMessage &request) = 0;
 };
 
@@ -75,7 +77,7 @@ struct QuackStatementState {
 struct QuackConnection {
 	QuackConnection(string connection_id_p, idx_t heartbeat_timeout_seconds_p, StorageVersion wire_version_p,
 	                string client_id_hash_p, shared_ptr<atomic<idx_t>> live_caches_p,
-	                unique_ptr<QuackHostSession> host_session_p);
+	                shared_ptr<QuackHostSession> host_session_p);
 	~QuackConnection();
 
 	//! Renew unless the timeout has already elapsed. Once expired, a lease cannot be revived.
@@ -86,7 +88,7 @@ struct QuackConnection {
 
 	//! Guards the session state below and the result cache. Never held across a statement.
 	mutex lock;
-	unique_ptr<QuackHostSession> host_session;
+	shared_ptr<QuackHostSession> host_session;
 	//! Replay cache of the last client query's result stream, null unless quack_enable_reconnects.
 	unique_ptr<QuackResultCache> result_cache;
 	//! The owning server's live-cache counter, handed to every cache this connection creates.
@@ -169,6 +171,7 @@ struct QuackRequest {
 	const_data_ptr_t ResponseData() const {
 		return response_data;
 	}
+
 	idx_t ResponseSize() const {
 		return response_size;
 	}
