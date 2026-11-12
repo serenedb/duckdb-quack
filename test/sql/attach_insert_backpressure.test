@@ -78,7 +78,7 @@ INSERT INTO rpc.keyed VALUES (5);
 statement error
 INSERT INTO rpc.keyed SELECT i FROM src;
 ----
-Duplicate key
+duplicate key
 
 statement ok
 INSERT INTO rpc.keyed VALUES (6);
