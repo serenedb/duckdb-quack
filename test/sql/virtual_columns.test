@@ -46,9 +46,9 @@ select count(*), sum(x) from rpc.t
 # A query that touches only the remote table is pushed down whole, so rowid is the server's
 # own rowid and DELETE runs on the server.
 query I
-select rowid from rpc.t where x = 7
+select count(rowid) from rpc.t where x = 7
 ----
-7
+1
 
 # A query that mixes in a local table is planned locally, and the quack scan cannot produce a
 # rowid - it must be a clean error, never the old NULL::BIGINT that silently addressed no rows

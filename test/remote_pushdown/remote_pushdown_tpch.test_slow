@@ -6,11 +6,21 @@ require tpch
 
 include test/template/quack_setup.test_template
 
-statement ok quack_db:quack_server_con
-call dbgen(sf=1, schema='{server_schema}');
+statement ok
+call dbgen(sf=1);
 
 statement ok
 attach {server} as rpc (token 'asdf')
+
+foreach tbl lineitem orders partsupp part customer supplier nation region
+
+statement ok
+create table rpc.{server_schema}.${tbl} as from ${tbl};
+
+statement ok
+drop table ${tbl};
+
+endloop
 
 statement ok
 use rpc

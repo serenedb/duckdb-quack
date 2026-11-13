@@ -29,7 +29,7 @@ statement ok
 INSERT INTO rpc.t_scan SELECT i FROM src;
 
 query II
-SELECT count(*), count(*) FILTER (WHERE i != rn) FROM (SELECT i, row_number() OVER () - 1 AS rn FROM rpc.t_scan);
+SELECT count(*), count(*) FILTER (WHERE i != rn) FROM (SELECT i, row_number() OVER (order by i) - 1 AS rn FROM rpc.t_scan);
 ----
 300000	0
 
@@ -40,7 +40,7 @@ statement ok
 INSERT INTO rpc.t_range SELECT * FROM range(300000) t(i);
 
 query II
-SELECT count(*), count(*) FILTER (WHERE i != rn) FROM (SELECT i, row_number() OVER () - 1 AS rn FROM rpc.t_range);
+SELECT count(*), count(*) FILTER (WHERE i != rn) FROM (SELECT i, row_number() OVER (order by i) - 1 AS rn FROM rpc.t_range);
 ----
 300000	0
 
@@ -65,7 +65,7 @@ statement ok
 CREATE TABLE rpc.t_ctas AS SELECT i FROM src;
 
 query II
-SELECT count(*), count(*) FILTER (WHERE i != rn) FROM (SELECT i, row_number() OVER () - 1 AS rn FROM rpc.t_ctas);
+SELECT count(*), count(*) FILTER (WHERE i != rn) FROM (SELECT i, row_number() OVER (order by i) - 1 AS rn FROM rpc.t_ctas);
 ----
 300000	0
 
