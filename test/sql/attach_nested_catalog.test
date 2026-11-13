@@ -42,10 +42,11 @@ use rpc
 # the server's default catalog keeps its schemas at the top level; every other catalog becomes a
 # top-level schema holding that catalog's own schemas
 query II
-select schema_name, parent_schema from duckdb_schemas() where database_name='rpc' and schema_name not in ('information_schema', 'pg_catalog', 'public', 'sdb_docs', 'memory') and parent_schema is distinct from 'memory' order by all
+select schema_name, parent_schema from duckdb_schemas() where database_name='rpc' order by all
 ----
 main	other
 other	NULL
+public	NULL
 shared	other
 shared	NULL
 

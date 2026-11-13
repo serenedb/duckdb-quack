@@ -45,10 +45,11 @@ use rpc
 
 # --- the local schema tree mirrors the server's
 query II
-select schema_name, parent_schema from duckdb_schemas() where database_name='rpc' and schema_name not in ('information_schema', 'pg_catalog', 'public', 'sdb_docs', 'memory') and parent_schema is distinct from 'memory' order by all
+select schema_name, parent_schema from duckdb_schemas() where database_name='rpc' order by all
 ----
 child	s1
 grandchild	child
+public	NULL
 s1	NULL
 
 # --- tables and views resolve through the nested path
@@ -131,11 +132,12 @@ from s1.child.fresh_t
 7
 
 query II
-select schema_name, parent_schema from duckdb_schemas() where database_name='rpc' and schema_name not in ('information_schema', 'pg_catalog', 'public', 'sdb_docs', 'memory') and parent_schema is distinct from 'memory' order by all
+select schema_name, parent_schema from duckdb_schemas() where database_name='rpc' order by all
 ----
 child	s1
 fresh	child
 grandchild	child
+public	NULL
 s1	NULL
 
 statement ok
