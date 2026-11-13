@@ -1,4 +1,5 @@
 #include "quack_fetch_ahead.hpp"
+#include "quack_settings.hpp"
 
 #include "duckdb/common/enums/task_scheduler_type.hpp"
 #include "duckdb/common/random_engine.hpp"
@@ -132,10 +133,7 @@ QuackFetcher::QuackFetcher(ClientContext &context, QuackClientConnection &connec
 		// Register runs the POST inline on the scan thread; deeper pipelining is impossible.
 		depth = 1;
 	}
-	Value delay_val;
-	if (context.TryGetCurrentSetting("quack_debug_fetch_delay_ms", delay_val) && !delay_val.IsNull()) {
-		debug_delay_ms = delay_val.GetValue<uint64_t>();
-	}
+	debug_delay_ms = QuackDebugSetting(context, "quack_debug_fetch_delay_ms");
 	// Claims start at 1: FETCH batch indices are dense from 1 (the PREPARE batch is 0).
 	buffer = make_shared_ptr<QuackFetchBuffer>();
 

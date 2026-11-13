@@ -161,6 +161,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "Seconds an idle cached result is kept before it is dropped (0 = never)",
 	                          LogicalType::UBIGINT, Value::UBIGINT(3600), RequireServerAccess, SetScope::GLOBAL);
 
+#ifdef DEBUG
 	config.AddExtensionOption("quack_debug_fetch_delay_ms",
 	                          "DEBUG SETTING: max random delay in ms before a FETCH response is published, "
 	                          "stressing out-of-order batch arrival",
@@ -185,6 +186,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "DEBUG SETTING: max random delay in ms before a SEND_DATA request goes out, "
 	                          "stressing out-of-order batch arrival on the server",
 	                          LogicalType::UBIGINT, Value::UBIGINT(0));
+#endif
 
 	loader.GetDatabaseInstance().GetLogManager().RegisterLogType(make_uniq<QuackLogType>());
 

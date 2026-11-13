@@ -59,9 +59,9 @@ unique_ptr<GlobalSinkState> QuackInsert::GetGlobalSinkState(ClientContext &conte
 		table_entry = &entry->Cast<QuackTableCatalogEntry>();
 	}
 
-	auto debug_delay_ms = QuackGetUBigintSetting(context, "quack_debug_send_delay_ms", 0);
-	auto debug_duplicate_sends = QuackGetUBigintSetting(context, "quack_debug_duplicate_sends", 0) > 0;
-	auto debug_drop_batch = QuackGetUBigintSetting(context, "quack_debug_drop_batch", 0);
+	auto debug_delay_ms = QuackDebugSetting(context, "quack_debug_send_delay_ms");
+	auto debug_duplicate_sends = QuackDebugSetting(context, "quack_debug_duplicate_sends") > 0;
+	auto debug_drop_batch = QuackDebugSetting(context, "quack_debug_drop_batch");
 	auto &quack_catalog = table_entry->catalog.Cast<QuackCatalog>();
 	auto &types = children[0].get().GetTypes();
 

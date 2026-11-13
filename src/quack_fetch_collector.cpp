@@ -117,7 +117,7 @@ public:
 
 public:
 	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const override {
-		auto debug_delay_ms = QuackGetUBigintSetting(context, "quack_debug_emit_delay_ms", 0);
+		auto debug_delay_ms = QuackDebugSetting(context, "quack_debug_emit_delay_ms");
 		auto emitter = make_uniq<QuackFetchBufferEmitter>(stream, debug_delay_ms);
 		auto state = MakeQuackRebalancerGlobalState(context, types, order_mode, std::move(emitter));
 		state->client_context = context.shared_from_this();

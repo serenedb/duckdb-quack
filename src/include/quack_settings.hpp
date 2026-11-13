@@ -29,6 +29,17 @@ static constexpr idx_t QUACK_DEFAULT_STATEMENT_TIMEOUT_MS_DEFAULT = 3600ULL * 10
 idx_t QuackGetUBigintSetting(ClientContext &context, const char *name, idx_t default_value);
 idx_t QuackGetUBigintSetting(DatabaseInstance &db, const char *name, idx_t default_value);
 
+//! A quack_debug_* setting, which only a debug build has
+#ifdef DEBUG
+inline idx_t QuackDebugSetting(ClientContext &context, const char *name) {
+	return QuackGetUBigintSetting(context, name, 0);
+}
+#else
+inline idx_t QuackDebugSetting(ClientContext &, const char *) {
+	return 0;
+}
+#endif
+
 //! Resolve the server budget for each FETCH or INSERT stream buffer. 0 = no byte limit.
 idx_t QuackServerStreamBufferBytes(DatabaseInstance &db);
 
