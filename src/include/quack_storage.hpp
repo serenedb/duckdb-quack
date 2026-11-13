@@ -49,7 +49,7 @@ public:
 	QuackScheduler scheduler;
 
 private:
-	mutex servers_lock;
+	mutex servers_mutex;
 	vector<reference<QuackServer>> servers;
 };
 

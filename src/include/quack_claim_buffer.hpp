@@ -81,7 +81,7 @@ public:
 				return;
 			}
 			// The head of the stream always gets in. Later batches cannot starve the next pop.
-			auto fits = [&]() DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
+			auto fits = [&] DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
 				return capacity == 0 || buffered_bytes == 0 || buffered_bytes + bytes <= capacity || finished ||
 				       errored || HeadOfStream(batch_index);
 			};
@@ -220,7 +220,7 @@ public:
 
 	void WaitForBatch(idx_t claim) DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
 		annotated_lock_guard<annotated_mutex> guard(lock);
-		auto ready = [&]() DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
+		auto ready = [&] DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
 			return batches.find(claim) != batches.end() || finished || errored;
 		};
 		// The wait has a limit, so the consumer can look for a cancel again.
@@ -229,7 +229,7 @@ public:
 
 	void WaitForAny() DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
 		annotated_lock_guard<annotated_mutex> guard(lock);
-		auto ready = [&]() DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
+		auto ready = [&] DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
 			return !batches.empty() || finished || errored;
 		};
 		// The wait has a limit, so the consumer can look for a cancel again.

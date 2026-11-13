@@ -49,7 +49,7 @@ public:
 		{
 			lock_guard<mutex> guard(state->lock);
 			state->stopping = true;
-			auto idle = [this]() DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
+			auto idle = [this] DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
 				return !state->running;
 			};
 			state->lock.Await(absl::Condition(&idle));
@@ -101,7 +101,7 @@ private:
 	}
 
 	static void Loop(shared_ptr<State> state) {
-		auto stopped = [&state]() DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
+		auto stopped = [&state] DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
 			return state->stopping;
 		};
 		while (true) {

@@ -124,12 +124,12 @@ void QuackStorageExtensionInfo::RunInBackground(const DatabaseInstance &instance
 }
 
 void QuackStorageExtensionInfo::AddServer(QuackServer &server) {
-	lock_guard<mutex> guard(servers_lock);
+	lock_guard<mutex> guard(servers_mutex);
 	servers.push_back(server);
 }
 
 void QuackStorageExtensionInfo::RemoveServer(QuackServer &server) {
-	lock_guard<mutex> guard(servers_lock);
+	lock_guard<mutex> guard(servers_mutex);
 	servers.erase(std::remove_if(servers.begin(), servers.end(),
 	                             [&](reference<QuackServer> entry) { return &entry.get() == &server; }),
 	              servers.end());
@@ -137,7 +137,7 @@ void QuackStorageExtensionInfo::RemoveServer(QuackServer &server) {
 
 vector<QuackConnectionSnapshot> QuackStorageExtensionInfo::GetActiveConnectionSnaps() {
 	vector<QuackConnectionSnapshot> result;
-	lock_guard<mutex> guard(servers_lock);
+	lock_guard<mutex> guard(servers_mutex);
 	for (auto &server : servers) {
 		for (auto &snapshot : server.get().GetActiveConnectionSnap()) {
 			result.push_back(std::move(snapshot));

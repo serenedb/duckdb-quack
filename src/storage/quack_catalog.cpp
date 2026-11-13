@@ -259,7 +259,7 @@ QuackSchemaSet &QuackCatalog::GetSchemas(ClientContext &context) {
 
 shared_ptr<QuackSchemaSet> QuackCatalog::AcquireSnapshot(ClientContext &context) {
 	auto uses_published = ServesOwnConnection(context);
-	auto no_load_running = [this]() DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
+	auto no_load_running = [this] DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
 		return !loading_context;
 	};
 	unique_lock<mutex> guard(snapshot_lock);
