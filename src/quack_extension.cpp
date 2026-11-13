@@ -2,7 +2,6 @@
 
 #include <cstdlib>
 
-#include "duckdb/catalog/default/default_table_functions.hpp"
 #include "duckdb/common/types/uuid.hpp"
 #include "duckdb/logging/log_manager.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -89,38 +88,6 @@ static void QuackConnectionIdFunc(const DataChunk &args, ExpressionState &state,
 	result.SetValue(0, Value(quack_catalog.GetClientConnection(state.GetContext())->ConnectionId()));
 }
 
-static void QuackIdentifyFun(ClientContext &, TableFunctionInput &, DataChunk &) {
-	// No-op: side effects are in bind.
-}
-
-static unique_ptr<FunctionData> QuackIdentifyBind(ClientContext &ctx, TableFunctionBindInput &input,
-                                                  vector<LogicalType> &return_types, vector<Identifier> &names) {
-	QuackStorageExtensionInfo::CheckAccess(ctx, QuackAccess::SERVER);
-	auto &db_config = DBConfig::GetConfig(ctx);
-	for (auto &kv : input.named_parameters) {
-		if (kv.second.IsNull()) {
-			continue;
-		}
-		db_config.SetOptionByName(Identifier("whoami_" + kv.first), kv.second);
-	}
-	return_types.emplace_back(LogicalType::BOOLEAN);
-	names.emplace_back("ok");
-	return nullptr;
-}
-
-static TableFunction GetQuackIdentifyFunction() {
-	FunctionSignature signature;
-	signature.WithTypedKwargs("options", [&](TypedKwargs &options) {
-		options.Add("name", LogicalType::VARCHAR)
-		    .Add("provider", LogicalType::VARCHAR)
-		    .Add("hostname", LogicalType::VARCHAR)
-		    .Add("region", LogicalType::VARCHAR)
-		    .Add("meta", LogicalType::VARCHAR);
-	}); // JSON as string
-	TableFunction fun("quack_identify", std::move(signature), QuackIdentifyFun, QuackIdentifyBind);
-	return fun;
-}
-
 static void LoadInternal(ExtensionLoader &loader) {
 	loader.SetDescription("The DuckDB 'Quack' Client/Server Protocol");
 
@@ -135,16 +102,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "FETCH requests kept in flight ahead of the scan (0 = number of async threads)",
 	                          LogicalType::UBIGINT, Value::UBIGINT(0));
 
-	config.AddExtensionOption("quack_debug_fetch_delay_ms",
-	                          "DEBUG SETTING: max random delay in ms before a FETCH response is published, "
-	                          "stressing out-of-order batch arrival",
-	                          LogicalType::UBIGINT, Value::UBIGINT(0));
-
-	config.AddExtensionOption("quack_debug_emit_delay_ms",
-	                          "DEBUG SETTING: max random delay in ms before the fetch collector publishes a "
-	                          "batch, stressing out-of-order emission",
-	                          LogicalType::UBIGINT, Value::UBIGINT(0));
-
 	config.AddExtensionOption("quack_target_batch_bytes",
 	                          "Target in-memory size of one rebalanced batch (one wire message payload); "
 	                          "batches are cut when they reach this size",
@@ -154,21 +111,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "Pending (unstamped) bytes the batch rebalancer buffers before gating non-minimum "
 	                          "producers (0 = automatic, memory-manager governed)",
 	                          LogicalType::UBIGINT, Value::UBIGINT(QUACK_REBALANCE_BUFFER_BYTES_DEFAULT));
-
-	config.AddExtensionOption("quack_debug_duplicate_sends",
-	                          "DEBUG SETTING: send every SEND_DATA batch two times, imitating a transport retry; "
-	                          "the receiver must drop the duplicate",
-	                          LogicalType::UBIGINT, Value::UBIGINT(0));
-
-	config.AddExtensionOption("quack_debug_drop_batch",
-	                          "DEBUG SETTING: do not send the SEND_DATA batch with this dense index (0 = off); "
-	                          "the terminal message must then fail the statement instead of inserting less data",
-	                          LogicalType::UBIGINT, Value::UBIGINT(0));
-
-	config.AddExtensionOption("quack_debug_send_delay_ms",
-	                          "DEBUG SETTING: max random delay in ms before a SEND_DATA request goes out, "
-	                          "stressing out-of-order batch arrival on the server",
-	                          LogicalType::UBIGINT, Value::UBIGINT(0));
 
 	config.AddExtensionOption("quack_server_stream_buffer_bytes",
 	                          "Server-side per-stream byte budget, at most a quarter of memory_limit: FETCH counts "
@@ -219,21 +161,30 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "Seconds an idle cached result is kept before it is dropped (0 = never)",
 	                          LogicalType::UBIGINT, Value::UBIGINT(3600), RequireServerAccess, SetScope::GLOBAL);
 
-	// Process-wide fallback anchor for whoami().uptime when whoami_started_at isn't set.
-	// Stored as BIGINT epoch-microseconds to stay TZ-invariant regardless of ICU state.
-	config.AddExtensionOption("quack_loaded_at_us", "Epoch microseconds at extension load", LogicalType::BIGINT,
-	                          Value::BIGINT(Timestamp::GetCurrentTimestamp().value));
+	config.AddExtensionOption("quack_debug_fetch_delay_ms",
+	                          "DEBUG SETTING: max random delay in ms before a FETCH response is published, "
+	                          "stressing out-of-order batch arrival",
+	                          LogicalType::UBIGINT, Value::UBIGINT(0));
 
-	// whoami() identity fields — global settings so they propagate across all sessions
-	// (quack_query creates fresh server-side sessions that wouldn't see per-connection state).
-	config.AddExtensionOption("whoami_name", "Human-readable name for this node", LogicalType::VARCHAR, Value(""));
-	config.AddExtensionOption("whoami_provider", "Deployment provider (ec2, docker, local, ...)", LogicalType::VARCHAR,
-	                          Value(""));
-	config.AddExtensionOption("whoami_hostname", "Network hostname / public address", LogicalType::VARCHAR, Value(""));
-	config.AddExtensionOption("whoami_region", "Deployment region", LogicalType::VARCHAR, Value(""));
-	config.AddExtensionOption("whoami_started_at", "Node start time (ISO-8601 TIMESTAMP)", LogicalType::VARCHAR,
-	                          Value(""));
-	config.AddExtensionOption("whoami_meta", "Provider-specific metadata as JSON", LogicalType::VARCHAR, Value("{}"));
+	config.AddExtensionOption("quack_debug_emit_delay_ms",
+	                          "DEBUG SETTING: max random delay in ms before the fetch collector publishes a "
+	                          "batch, stressing out-of-order emission",
+	                          LogicalType::UBIGINT, Value::UBIGINT(0));
+
+	config.AddExtensionOption("quack_debug_duplicate_sends",
+	                          "DEBUG SETTING: send every SEND_DATA batch two times, imitating a transport retry; "
+	                          "the receiver must drop the duplicate",
+	                          LogicalType::UBIGINT, Value::UBIGINT(0));
+
+	config.AddExtensionOption("quack_debug_drop_batch",
+	                          "DEBUG SETTING: do not send the SEND_DATA batch with this dense index (0 = off); "
+	                          "the terminal message must then fail the statement instead of inserting less data",
+	                          LogicalType::UBIGINT, Value::UBIGINT(0));
+
+	config.AddExtensionOption("quack_debug_send_delay_ms",
+	                          "DEBUG SETTING: max random delay in ms before a SEND_DATA request goes out, "
+	                          "stressing out-of-order batch arrival on the server",
+	                          LogicalType::UBIGINT, Value::UBIGINT(0));
 
 	loader.GetDatabaseInstance().GetLogManager().RegisterLogType(make_uniq<QuackLogType>());
 
@@ -253,41 +204,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(QuackScanFromClientFunction::GetFunction());
 	loader.RegisterFunction(QuackCancelFunction::GetFunction());
 	loader.RegisterFunction(QuackClearCacheFunction::GetFunction());
-	loader.RegisterFunction(GetQuackIdentifyFunction());
 	loader.RegisterFunction(QuackActiveConnectionsFunction::GetFunction());
 
 	loader.RegisterFunction(QuackParseUriFunction::GetFunction());
 
 	StorageExtension::Register(loader.GetDatabaseInstance().config, QuackStorageExtension::STORAGE_EXTENSION_KEY,
 	                           duckdb::make_shared_ptr<QuackStorageExtension>());
-
-	// whoami() contract — register the table macro directly via the default-table-macro
-	// machinery so function resolution in the body is deferred to invocation time
-	// (avoids the get_current_timestamp / core_functions chicken-and-egg).
-	static const DefaultTableMacro whoami_macro = {
-	    DEFAULT_SCHEMA,       "whoami", {nullptr}, // no positional parameters
-	    {{nullptr, nullptr}},                      // no named parameters
-	    R"SQL(SELECT
-		    NULLIF(current_setting('whoami_name'), '')::VARCHAR     AS name,
-		    NULLIF(current_setting('whoami_provider'), '')::VARCHAR AS provider,
-		    NULLIF(current_setting('whoami_hostname'), '')::VARCHAR AS hostname,
-		    NULLIF(current_setting('whoami_region'), '')::VARCHAR   AS region,
-		    to_microseconds(epoch_us(current_timestamp) - COALESCE(
-		      epoch_us(NULLIF(current_setting('whoami_started_at'), '')::TIMESTAMPTZ),
-		      current_setting('quack_loaded_at_us')::BIGINT
-		    ))                                                      AS uptime,
-		    current_timestamp                           AS ts_now,
-		    json_merge_patch(
-		      json_object(
-		        'duckdb_version', version(),
-		        'platform',       (SELECT platform FROM pragma_platform())
-		      ),
-		      COALESCE(TRY_CAST(current_setting('whoami_meta') AS JSON), '{}'::JSON)
-		    )                                           AS meta
-	    )SQL",
-	};
-	auto whoami_info = DefaultTableFunctionGenerator::CreateTableMacroInfo(whoami_macro);
-	loader.RegisterFunction(*whoami_info);
 }
 
 void QuackExtension::Load(ExtensionLoader &loader) {

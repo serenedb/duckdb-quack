@@ -23,7 +23,7 @@ public:
 enum class QuackAccess : uint8_t {
 	//! open a session on a server: ATTACH, quack_query with an address
 	CONNECT,
-	//! read or change this server's sessions or identity: quack_active_connections, quack_identify
+	//! read or change this server's sessions: quack_active_connections, the server-wide settings
 	SERVER,
 };
 
