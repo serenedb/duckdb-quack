@@ -648,9 +648,11 @@ static void StartStatement(QuackRequest &request, DatabaseInstance &db) {
 			// a new client query displaces the retained one, even if caching is now off
 			connection.ClearResultCache();
 		}
-		connection.sql_query = prepare_request_message.Query();
-		connection.query_state = QuackQueryState::ACTIVE;
-		connection.query_started_at = Timestamp::GetCurrentTimestamp();
+		if (!prepare_request_message.DescribeOnly()) {
+			connection.sql_query = prepare_request_message.Query();
+			connection.query_state = QuackQueryState::ACTIVE;
+			connection.query_started_at = Timestamp::GetCurrentTimestamp();
+		}
 	}
 	auto &context = connection.host_session->Context();
 	// A statement that reads a client stream cannot bind its result before the client sends. The scan finds
