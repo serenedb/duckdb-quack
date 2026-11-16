@@ -165,7 +165,7 @@ public:
 			queue->Close();
 		} catch (...) { // NOLINT: a destructor must not throw
 		}
-		session->CancelQueryInBackground(query_uuid);
+		session->TryCancelQuery(query_uuid);
 	}
 
 	unique_ptr<QuackFragmentBuilder> OpenFragment(ClientContext &context, idx_t size_hint) override {
@@ -223,7 +223,7 @@ public:
 		queue.reset();
 		// A request that fails, such as at the statement's deadline, leaves the statement waiting on the server
 		absl::Cleanup cancel_on_failure = [&] {
-			session->CancelQueryInBackground(query_uuid);
+			session->TryCancelQuery(query_uuid);
 		};
 
 		auto client_wrapper = session->GetClient(context);

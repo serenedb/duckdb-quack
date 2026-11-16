@@ -1,14 +1,6 @@
 #pragma once
 
-#include "duckdb/common/mutex.hpp"
-#include "duckdb/main/client_context.hpp"
-#include "duckdb/main/database.hpp"
 #include "duckdb/storage/storage_extension.hpp"
-
-#include "quack_periodic_worker.hpp"
-#include "quack_server.hpp"
-
-#include <functional>
 
 namespace duckdb {
 
@@ -17,40 +9,6 @@ public:
 	QuackStorageExtension();
 
 	static constexpr const char *STORAGE_EXTENSION_KEY = "quack";
-};
-
-//! What a quack function does for its session, for the host to allow or refuse
-enum class QuackAccess : uint8_t {
-	//! open a session on a server: ATTACH, quack_query with an address
-	CONNECT,
-	//! read or change this server's sessions: quack_active_connections, the server-wide settings
-	SERVER,
-};
-
-//! Throws to refuse
-using QuackAccessCheck = std::function<void(ClientContext &context, QuackAccess access)>;
-
-//! The quack servers running on a database: a server registers itself for its lifetime
-class QuackStorageExtensionInfo : public StorageExtensionInfo {
-public:
-	static QuackStorageExtensionInfo &GetState(const DatabaseInstance &instance);
-	static void CheckAccess(ClientContext &context, QuackAccess access);
-	//! Run `task`, which waits on a peer, on `scheduler` so no thread waits for it; without a scheduler, run it now
-	static void RunInBackground(const DatabaseInstance &instance, std::function<void()> task);
-
-	void AddServer(QuackServer &server);
-	void RemoveServer(QuackServer &server);
-	//! The connections of every server, as quack_active_connections() lists them
-	vector<QuackConnectionSnapshot> GetActiveConnectionSnaps();
-
-	//! Set before the database runs a query
-	QuackAccessCheck access_check;
-	//! Where heartbeats and the requests nobody waits for run; without one, each heartbeat has a thread of its own
-	QuackScheduler scheduler;
-
-private:
-	mutex servers_mutex;
-	vector<reference<QuackServer>> servers;
 };
 
 } // namespace duckdb

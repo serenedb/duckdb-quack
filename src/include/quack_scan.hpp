@@ -44,7 +44,7 @@ struct QuackBindResult {
 	}
 	~QuackBindResult() {
 		if (!completed) {
-			connection->CancelQueryInBackground(query_uuid);
+			connection->TryCancelQuery(query_uuid);
 		}
 	}
 

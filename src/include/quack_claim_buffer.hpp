@@ -8,7 +8,6 @@
 #include "duckdb/parallel/interrupt.hpp"
 #include "duckdb/parallel/scan_read_ahead.hpp"
 
-#include <functional>
 #include <map>
 #include <set>
 
@@ -26,10 +25,6 @@ enum class QuackPushStatus : uint8_t {
 	DROPPED,     //! a duplicate, or the stream is closed: the batch is consumed, do not retry
 	NO_CAPACITY, //! not inserted: retry the same batch after capacity frees
 };
-
-//! A one-shot callback for a host that waits on a buffer without blocking a thread: it fires once, from
-//! any thread, at the next change of the buffer (a push, a pop, the end of the stream).
-using QuackWaker = std::function<void()>;
 
 //! Dense-index membership: a contiguous prefix plus a sparse overflow set. The caller locks.
 struct QuackDenseIndexSet {
@@ -73,7 +68,7 @@ public:
 	//! and the head of the stream always admit one, so the producer cannot deadlock.
 	void PushBatch(idx_t batch_index, PAYLOAD payload, idx_t bytes = 0) DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
 		shared_ptr<ReadAheadJobCompletion> waiter;
-		vector<QuackWaker> wakes;
+		vector<InterruptState> wakes;
 		{
 			annotated_lock_guard<annotated_mutex> guard(lock);
 			if (Seen(batch_index)) {
@@ -107,7 +102,7 @@ public:
 	QuackPushStatus TryPushBatch(idx_t batch_index, PAYLOAD &payload, idx_t bytes,
 	                             optional_ptr<const InterruptState> interrupt) {
 		shared_ptr<ReadAheadJobCompletion> waiter;
-		vector<QuackWaker> wakes;
+		vector<InterruptState> wakes;
 		{
 			annotated_lock_guard<annotated_mutex> guard(lock);
 			if (finished || errored) {
@@ -152,16 +147,17 @@ public:
 		return completion;
 	}
 
-	//! Fire `waker` at the next change of this buffer. A change between the caller's last look and the
-	//! registration fires nothing, so the caller looks again after registering.
-	void AddWaker(QuackWaker waker) {
+	//! Fire `state` once, from any thread, at the next change of this buffer (a push, a pop, the end of the stream),
+	//! for a waiter that does not block a thread. A change between the caller's last look and the registration fires
+	//! nothing, so the caller looks again after registering.
+	void AddWaker(const InterruptState &state) {
 		annotated_lock_guard<annotated_mutex> guard(lock);
-		wakers.push_back(std::move(waker));
+		wakers.push_back(state);
 	}
 
 	//! Fire the wakers for a change their owners watch outside this buffer.
 	void NotifyChange() {
-		vector<QuackWaker> wakes;
+		vector<InterruptState> wakes;
 		{
 			annotated_lock_guard<annotated_mutex> guard(lock);
 			wakes = TakeWakers();
@@ -172,7 +168,7 @@ public:
 	//! FINISHED means the stream ended and the claim cannot arrive.
 	PopStatus TryPopClaimed(idx_t claim, PAYLOAD &payload_out) {
 		vector<InterruptState> capacity_wakes;
-		vector<QuackWaker> wakes;
+		vector<InterruptState> wakes;
 		{
 			annotated_lock_guard<annotated_mutex> guard(lock);
 			if (errored) {
@@ -189,14 +185,14 @@ public:
 			capacity_wakes = TakeCapacityWaiters();
 			wakes = TakeWakers();
 		}
-		WakeCapacity(capacity_wakes);
+		Wake(capacity_wakes);
 		Wake(wakes);
 		return PopStatus::BATCH;
 	}
 
 	PopStatus TryPopAny(idx_t &batch_index_out, PAYLOAD &payload_out) {
 		vector<InterruptState> capacity_wakes;
-		vector<QuackWaker> wakes;
+		vector<InterruptState> wakes;
 		{
 			annotated_lock_guard<annotated_mutex> guard(lock);
 			if (errored) {
@@ -213,7 +209,7 @@ public:
 			capacity_wakes = TakeCapacityWaiters();
 			wakes = TakeWakers();
 		}
-		WakeCapacity(capacity_wakes);
+		Wake(capacity_wakes);
 		Wake(wakes);
 		return PopStatus::BATCH;
 	}
@@ -240,7 +236,7 @@ public:
 	void Finish(optional_idx expected_total = optional_idx()) {
 		std::map<idx_t, shared_ptr<ReadAheadJobCompletion>> drained;
 		vector<InterruptState> capacity_wakes;
-		vector<QuackWaker> wakes;
+		vector<InterruptState> wakes;
 		{
 			annotated_lock_guard<annotated_mutex> guard(lock);
 			if (expected_total.IsValid() && !errored && pushed_count != expected_total.GetIndex()) {
@@ -258,14 +254,14 @@ public:
 		for (auto &entry : drained) {
 			entry.second->FinishIOTask();
 		}
-		WakeCapacity(capacity_wakes);
+		Wake(capacity_wakes);
 		Wake(wakes);
 	}
 
 	void SetError(ErrorData error_p) {
 		std::map<idx_t, shared_ptr<ReadAheadJobCompletion>> drained;
 		vector<InterruptState> capacity_wakes;
-		vector<QuackWaker> wakes;
+		vector<InterruptState> wakes;
 		{
 			annotated_lock_guard<annotated_mutex> guard(lock);
 			if (!errored) {
@@ -281,7 +277,7 @@ public:
 		for (auto &entry : drained) {
 			entry.second->FinishIOTask();
 		}
-		WakeCapacity(capacity_wakes);
+		Wake(capacity_wakes);
 		Wake(wakes);
 	}
 
@@ -345,22 +341,16 @@ private:
 		return taken;
 	}
 
-	vector<QuackWaker> TakeWakers() DUCKDB_REQUIRES(lock) {
+	vector<InterruptState> TakeWakers() DUCKDB_REQUIRES(lock) {
 		auto taken = std::move(wakers);
 		wakers.clear();
 		return taken;
 	}
 
 	//! Fired outside the lock. An unnecessary wake only makes the producer retry.
-	static void WakeCapacity(vector<InterruptState> &wakes) {
+	static void Wake(vector<InterruptState> &wakes) {
 		for (auto &state : wakes) {
 			state.Callback();
-		}
-	}
-
-	static void Wake(vector<QuackWaker> &wakes) {
-		for (auto &waker : wakes) {
-			waker();
 		}
 	}
 
@@ -380,7 +370,7 @@ private:
 	//! Parked by TryPushBatch. A pop that frees bytes, or a stream close, fires all of them.
 	vector<InterruptState> capacity_waiters DUCKDB_GUARDED_BY(lock);
 	//! Fired by the next change of any kind.
-	vector<QuackWaker> wakers DUCKDB_GUARDED_BY(lock);
+	vector<InterruptState> wakers DUCKDB_GUARDED_BY(lock);
 	//! Checked against Finish(expected_total). Dedupe keeps retries out of this count.
 	idx_t pushed_count DUCKDB_GUARDED_BY(lock) = 0;
 	QuackDenseIndexSet seen DUCKDB_GUARDED_BY(lock);

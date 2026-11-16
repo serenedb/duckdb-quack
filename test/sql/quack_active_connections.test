@@ -8,7 +8,7 @@ statement ok quack_db:quack_server_con
 create table fuu as values(42, 43);
 
 # no connections yet
-query I
+query I quack_db:quack_server_con
 select count(*) from (FROM quack_active_connections() WHERE connection_id <> '{harness}');
 ----
 0

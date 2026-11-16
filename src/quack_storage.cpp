@@ -23,7 +23,6 @@ static bool IsBareQuackPath(const string &uri) {
 static unique_ptr<Catalog> QuackAttach(optional_ptr<StorageExtensionInfo> storage_info, ClientContext &context,
                                        AttachedDatabase &db, const string &name, AttachInfo &info,
                                        AttachOptions &attach_options) {
-	QuackStorageExtensionInfo::CheckAccess(context, QuackAccess::CONNECT);
 	// writes are pushed down to the server as whole statements, so a read-only attach cannot be enforced yet
 	if (attach_options.access_mode == AccessMode::READ_ONLY) {
 		throw NotImplementedException("READ_ONLY is not currently supported for Quack databases - attach \"%s\" "
@@ -96,52 +95,4 @@ static unique_ptr<TransactionManager> QuackCreateTransactionManager(optional_ptr
 QuackStorageExtension::QuackStorageExtension() {
 	attach = QuackAttach;
 	create_transaction_manager = QuackCreateTransactionManager;
-	storage_info = make_shared_ptr<QuackStorageExtensionInfo>();
-}
-
-QuackStorageExtensionInfo &QuackStorageExtensionInfo::GetState(const DatabaseInstance &instance) {
-	auto extension = StorageExtension::Find(instance.config, QuackStorageExtension::STORAGE_EXTENSION_KEY);
-	if (!extension) {
-		throw InternalException("The quack extension is not loaded");
-	}
-	return static_cast<QuackStorageExtensionInfo &>(*extension->storage_info);
-}
-
-void QuackStorageExtensionInfo::CheckAccess(ClientContext &context, QuackAccess access) {
-	auto &state = GetState(*context.db);
-	if (state.access_check) {
-		state.access_check(context, access);
-	}
-}
-
-void QuackStorageExtensionInfo::RunInBackground(const DatabaseInstance &instance, std::function<void()> task) {
-	auto &state = GetState(instance);
-	if (!state.scheduler) {
-		task();
-		return;
-	}
-	state.scheduler(milliseconds(0), std::move(task));
-}
-
-void QuackStorageExtensionInfo::AddServer(QuackServer &server) {
-	lock_guard<mutex> guard(servers_mutex);
-	servers.push_back(server);
-}
-
-void QuackStorageExtensionInfo::RemoveServer(QuackServer &server) {
-	lock_guard<mutex> guard(servers_mutex);
-	servers.erase(std::remove_if(servers.begin(), servers.end(),
-	                             [&](reference<QuackServer> entry) { return &entry.get() == &server; }),
-	              servers.end());
-}
-
-vector<QuackConnectionSnapshot> QuackStorageExtensionInfo::GetActiveConnectionSnaps() {
-	vector<QuackConnectionSnapshot> result;
-	lock_guard<mutex> guard(servers_mutex);
-	for (auto &server : servers) {
-		for (auto &snapshot : server.get().GetActiveConnectionSnap()) {
-			result.push_back(std::move(snapshot));
-		}
-	}
-	return result;
 }

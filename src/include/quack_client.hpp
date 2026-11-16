@@ -150,8 +150,8 @@ public:
 	~QuackClientConnection();
 
 	void CancelQuery(hugeint_t query_uuid) const;
-	//! CancelQuery off the calling thread, for a caller that does not wait for the answer
-	void CancelQueryInBackground(hugeint_t query_uuid) const;
+	//! CancelQuery for a destructor or a failure path: a failure to reach the server is ignored
+	void TryCancelQuery(hugeint_t query_uuid) const;
 	//! End the session on the server. A closed connection refuses every later request.
 	void Close();
 

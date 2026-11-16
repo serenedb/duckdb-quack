@@ -12,7 +12,6 @@
 #include "quack_client.hpp"
 #include "quack_secret.hpp"
 #include "quack_settings.hpp"
-#include "quack_storage.hpp"
 #include "quack_uri.hpp"
 
 #include <absl/cleanup/cleanup.h>
@@ -262,7 +261,7 @@ unique_ptr<PrepareResponseMessage> QuackClientConnection::Prepare(ClientContext 
 	auto query_uuid = prepare->QueryUUID();
 	auto client_wrapper = GetClient(context);
 	absl::Cleanup cancel_on_failure = [&] {
-		CancelQueryInBackground(query_uuid);
+		TryCancelQuery(query_uuid);
 	};
 	auto response = client_wrapper->GetClient().Request<PrepareResponseMessage>(context, std::move(prepare));
 	std::move(cancel_on_failure).Cancel();
@@ -285,37 +284,23 @@ void QuackClientConnection::Close() {
 		cached_clients.clear();
 	}
 	try {
-		shared_ptr<QuackClient> client(clients.empty() ? QuackClient::GetClient(db, uri) : std::move(clients.back()));
-		// the session ends at the latest once its lease runs out, so nobody waits for the answer
-		QuackStorageExtensionInfo::RunInBackground(db, [client, connection_id = connection_id] {
-			try {
-				client->Request<SuccessResponse>(nullptr, make_uniq<DisconnectMessage>(connection_id),
-				                                 QuackControlDeadline());
-			} catch (...) { // NOLINT: best effort
-			}
-		});
+		auto client = clients.empty() ? QuackClient::GetClient(db, uri) : std::move(clients.back());
+		client->Request<SuccessResponse>(nullptr, make_uniq<DisconnectMessage>(connection_id), QuackControlDeadline());
 	} catch (...) { // NOLINT: best effort, the server ends the session once its lease runs out
 	}
 }
 
-void QuackClientConnection::CancelQueryInBackground(hugeint_t query_uuid) const {
+void QuackClientConnection::TryCancelQuery(hugeint_t query_uuid) const {
 	try {
-		QuackStorageExtensionInfo::RunInBackground(db, [connection = shared_from_this(), query_uuid] {
-			try {
-				connection->CancelQuery(query_uuid);
-			} catch (...) { // NOLINT: best effort, the server may already be gone
-			}
-		});
-	} catch (...) { // NOLINT: best effort, destructors call it
+		CancelQuery(query_uuid);
+	} catch (...) { // NOLINT: best effort, the server may already be gone
 	}
 }
 
 void QuackClientConnection::StartHeartbeat() {
 	auto random = make_shared_ptr<RandomEngine>();
-	heartbeat.Start(
-	    QuackStorageExtensionInfo::GetState(db).scheduler,
-	    [this, random] { return QuackHeartbeatInterval(heartbeat_timeout_seconds, *random); },
-	    [this] { SendHeartbeat(); });
+	heartbeat.Start([this, random] { return QuackHeartbeatInterval(heartbeat_timeout_seconds, *random); },
+	                [this] { SendHeartbeat(); });
 }
 
 //! A failed attempt is not terminal: the worker swallows the throw and retries next interval.
