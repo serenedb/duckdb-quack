@@ -79,9 +79,23 @@ static unique_ptr<FunctionData> QuackScanBind(ClientContext &context, TableFunct
 	if (disable_ssl_entry != input.named_parameters.end()) {
 		enable_ssl = !disable_ssl_entry->second.GetValue<bool>();
 	}
+	// a pinned server certificate turns HTTPS on; the secret's pin (if any) is applied in ConnectToServer
+	string ssl_fingerprint;
+	auto fingerprint_entry = input.named_parameters.find("ssl_fingerprint");
+	if (fingerprint_entry != input.named_parameters.end() && !fingerprint_entry->second.IsNull()) {
+		ssl_fingerprint = fingerprint_entry->second.ToString();
+		if (!enable_ssl && disable_ssl_entry != input.named_parameters.end()) {
+			throw InvalidInputException("ssl_fingerprint pins the server's TLS certificate and cannot be combined "
+			                            "with disable_ssl");
+		}
+		enable_ssl = true;
+	}
 
 	auto bind_data = make_uniq<QuackScanBindData>();
 	auto server_uri = QuackUri(initial_uri.Uri(), enable_ssl);
+	if (!ssl_fingerprint.empty()) {
+		server_uri.SetSslFingerprint(ssl_fingerprint);
+	}
 
 	// An explicit token wins; otherwise ConnectToServer takes it from a quack secret scoped to this URI.
 	string token;
@@ -504,6 +518,7 @@ TableFunction QuackScanFunction::GetFunction() {
 	    .AddParameter("query", LogicalType::VARCHAR)
 	    .WithTypedKwargs("options", [&](TypedKwargs &options) {
 		    options.Add("disable_ssl", LogicalType::BOOLEAN)
+		        .Add("ssl_fingerprint", LogicalType::VARCHAR)
 		        .Add("token", LogicalType::VARCHAR)
 		        .Add("client_id", LogicalType::VARCHAR)
 		        .Add("heartbeat_timeout", LogicalType::UBIGINT);

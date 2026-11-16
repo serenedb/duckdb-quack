@@ -49,6 +49,9 @@ static unique_ptr<BaseSecret> CreateQuackSecretFromConfig(ClientContext &, Creat
 		} else if (lower_name == "extra_http_headers") {
 			// Stored as a MAP(VARCHAR, VARCHAR) Value; injected into every quack HTTP request.
 			secret->secret_map["extra_http_headers"] = named_param.second;
+		} else if (lower_name == "ssl_fingerprint") {
+			// normalized at creation, so a malformed fingerprint fails now and not at the first ATTACH
+			secret->secret_map["ssl_fingerprint"] = QuackUri::NormalizeFingerprint(named_param.second.ToString());
 		} else {
 			throw InvalidInputException("Unknown named parameter for quack secret: %s", lower_name);
 		}
@@ -68,6 +71,7 @@ static void RegisterQuackSecretType(ExtensionLoader &loader) {
 	CreateSecretFunction config_fun = {QuackSecret::TYPE, "config", CreateQuackSecretFromConfig};
 	config_fun.named_parameters["token"] = LogicalType::VARCHAR;
 	config_fun.named_parameters["extra_http_headers"] = LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR);
+	config_fun.named_parameters["ssl_fingerprint"] = LogicalType::VARCHAR;
 	loader.RegisterFunction(config_fun);
 }
 

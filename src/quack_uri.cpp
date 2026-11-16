@@ -1,8 +1,35 @@
 #include "quack_uri.hpp"
 
+#include <cctype>
 #include <cstring>
 
 namespace duckdb {
+
+string QuackUri::NormalizeFingerprint(const string &fingerprint) {
+	auto trimmed = fingerprint;
+	StringUtil::Trim(trimmed);
+	if (StringUtil::StartsWith(StringUtil::Lower(trimmed), "sha256:")) {
+		trimmed = trimmed.substr(strlen("sha256:"));
+	}
+	string result;
+	for (auto c : trimmed) {
+		if (c == ':' || c == ' ') {
+			continue;
+		}
+		if (!std::isxdigit(static_cast<unsigned char>(c))) {
+			throw InvalidInputException(
+			    "Invalid SSL fingerprint \"%s\": expected the SHA-256 fingerprint of the server "
+			    "certificate as hex digits, optionally separated by colons",
+			    fingerprint);
+		}
+		result += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+	}
+	if (result.size() != 64) {
+		throw InvalidInputException("Invalid SSL fingerprint \"%s\": a SHA-256 fingerprint has 64 hex digits, got %llu",
+		                            fingerprint, result.size());
+	}
+	return result;
+}
 
 QuackUri::QuackUri(string uri_p, bool ssl_p) : ssl(ssl_p), uri(std::move(uri_p)) {
 	// we should really instantiate a parser here instead, but alas

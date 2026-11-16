@@ -179,6 +179,9 @@ void QuackClient::EnsureHttpParams(optional_ptr<ClientContext> context) {
 		} else {
 			http_params = http_util.InitializeParameters(db, request_url);
 		}
+		if (!uri.SslFingerprint().empty()) {
+			http_params->PinCertificate(uri.SslFingerprint());
+		}
 		// Resolve EXTRA_HTTP_HEADERS from the quack secret once; reused for every request on this client.
 		LoadExtraHttpHeaders(transaction_context, db, uri, extra_headers);
 	}
@@ -385,6 +388,15 @@ shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &co
 	ValidateHeartbeatTimeout(heartbeat_timeout_seconds);
 	auto server_uri = uri;
 	token = ResolveToken(context, uri, std::move(token));
+	if (server_uri.SslFingerprint().empty()) {
+		auto secret = QuackSecret::Find(context, nullptr, uri.CanonicalUri());
+		string secret_fingerprint;
+		if (secret && QuackSecret::TryGetSslFingerprint(*secret, secret_fingerprint)) {
+			// a pin only makes sense over TLS, so it turns HTTPS on
+			server_uri.SetSslFingerprint(secret_fingerprint);
+			server_uri.SetSsl(true);
+		}
+	}
 
 	// open a HTTP client to the server
 	auto client = QuackClient::GetClient(context, server_uri);

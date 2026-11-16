@@ -30,8 +30,8 @@ static unique_ptr<Catalog> QuackAttach(optional_ptr<StorageExtensionInfo> storag
 		                              name);
 	}
 	// the options the core did not consume are ours; the parser lower-cases their names
-	static const unordered_set<string> KNOWN_OPTIONS {"token", "secret", "disable_ssl", "client_id",
-	                                                  "heartbeat_timeout"};
+	static const unordered_set<string> KNOWN_OPTIONS {"token",           "secret",    "disable_ssl",
+	                                                  "ssl_fingerprint", "client_id", "heartbeat_timeout"};
 	for (auto &entry : attach_options.options) {
 		if (KNOWN_OPTIONS.find(entry.first) == KNOWN_OPTIONS.end()) {
 			throw BinderException("Unrecognized option for attach \"%s\"", entry.first);
@@ -70,6 +70,21 @@ static unique_ptr<Catalog> QuackAttach(optional_ptr<StorageExtensionInfo> storag
 	if (disable_ssl_entry != attach_options.options.end()) {
 		enable_ssl = !disable_ssl_entry->second.GetValue<bool>();
 	}
+	// a pinned server certificate: explicit option first, then the secret we already resolved
+	string ssl_fingerprint;
+	auto fingerprint_entry = attach_options.options.find("ssl_fingerprint");
+	if (fingerprint_entry != attach_options.options.end()) {
+		ssl_fingerprint = fingerprint_entry->second.ToString();
+	} else if (secret) {
+		QuackSecret::TryGetSslFingerprint(*secret, ssl_fingerprint);
+	}
+	if (!ssl_fingerprint.empty()) {
+		if (!enable_ssl && disable_ssl_entry != attach_options.options.end()) {
+			throw InvalidInputException("ssl_fingerprint pins the server's TLS certificate and cannot be combined "
+			                            "with disable_ssl");
+		}
+		enable_ssl = true;
+	}
 	string token;
 	if (has_token) {
 		token = token_entry->second.GetValue<string>();
@@ -83,6 +98,9 @@ static unique_ptr<Catalog> QuackAttach(optional_ptr<StorageExtensionInfo> storag
 	auto heartbeat_timeout = QuackClient::ResolveHeartbeatTimeout(
 	    context, heartbeat_timeout_entry != attach_options.options.end() ? &heartbeat_timeout_entry->second : nullptr);
 	QuackUri server_uri(uri, enable_ssl);
+	if (!ssl_fingerprint.empty()) {
+		server_uri.SetSslFingerprint(ssl_fingerprint);
+	}
 	return make_uniq<QuackCatalog>(db, server_uri, context, token, std::move(client_id), heartbeat_timeout);
 }
 

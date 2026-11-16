@@ -36,6 +36,8 @@ public:
 	static bool TryGetEndpoint(const SecretEntry &entry, string &result);
 	//! The token stored in the secret - throws when the secret does not carry one
 	static string GetToken(const SecretEntry &entry);
+	//! The pinned server certificate fingerprint stored in the secret, if any
+	static bool TryGetSslFingerprint(const SecretEntry &entry, string &result);
 };
 
 } // namespace duckdb
