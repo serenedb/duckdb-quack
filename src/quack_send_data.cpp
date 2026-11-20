@@ -43,7 +43,7 @@ public:
 		auto response_body = client.PostRaw(nullptr, payload->GetData() + body_start, body_size, deadline);
 		auto duration_ms = QuackNowMillis() - start_time;
 
-		auto response = QuackClient::DecodeResponse(response_body);
+		auto response = client.DecodeResponse(response_body);
 
 		string error;
 		if (response->Type() == MessageType::ERROR_RESPONSE) {

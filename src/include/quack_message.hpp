@@ -1,6 +1,7 @@
 #pragma once
 
 #include "duckdb/common/serializer/binary_serializer.hpp"
+#include "duckdb/common/serializer/deserializer.hpp"
 #include "duckdb/common/serializer/memory_stream.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/common/limits.hpp"
@@ -103,7 +104,7 @@ class QuackMessage {
 public:
 	//! `wire_version`: the storage version of the session, which decides the format and the fields that go out
 	virtual void ToMemoryStream(MemoryStream &write_stream, StorageVersion wire_version) const;
-	static unique_ptr<QuackMessage> FromMemoryStream(MemoryStream &read_stream);
+	static unique_ptr<QuackMessage> FromMemoryStream(MemoryStream &read_stream, DeserializationChecks checks);
 
 	//! A serialized payload instead of a body. The HTTP layer sends these bytes as they are. It is
 	//! null for a normal message.

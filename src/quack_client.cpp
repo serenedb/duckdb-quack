@@ -117,7 +117,7 @@ void QuackClient::EncodeRequest(optional_ptr<ClientContext> context, QuackMessag
 
 unique_ptr<QuackMessage> QuackClient::DecodeResponse(const string &response_body) {
 	MemoryStream read_stream((data_ptr_t)response_body.data(), response_body.size());
-	return QuackMessage::FromMemoryStream(read_stream);
+	return QuackMessage::FromMemoryStream(read_stream, QuackPeerDataChecks(db, DeserializationChecks::STRUCTURE));
 }
 
 Logger &QuackClient::GetRequestLogger(optional_ptr<ClientContext> context) {

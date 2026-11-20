@@ -82,8 +82,9 @@ public:
 	static void EncodeRequest(optional_ptr<ClientContext> context, QuackMessage &message, MemoryStream &out,
 	                          StorageVersion wire_version);
 
-	//! Decode a response body (owned bytes) into a message. Protocol-level and lock-free.
-	static unique_ptr<QuackMessage> DecodeResponse(const string &response_body);
+	//! Decode a response body (owned bytes) into a message, checking the server's batches. Protocol-level and
+	//! lock-free.
+	unique_ptr<QuackMessage> DecodeResponse(const string &response_body);
 
 	//! Emit a Quack request log entry through `logger`. Pass the query's context logger for per-query
 	//! attribution (connection/transaction/query id columns); the db logger only fits context-less

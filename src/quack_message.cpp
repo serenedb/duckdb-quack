@@ -304,9 +304,10 @@ ConnectionResponseMessage::ConnectionResponseMessage(string connection_id_p, idx
       heartbeat_timeout_seconds(heartbeat_timeout_seconds_p) {
 }
 
-unique_ptr<QuackMessage> QuackMessage::FromMemoryStream(MemoryStream &read_stream) {
+unique_ptr<QuackMessage> QuackMessage::FromMemoryStream(MemoryStream &read_stream, DeserializationChecks checks) {
 	read_stream.Rewind();
 	BinaryDeserializer deserializer(read_stream);
+	deserializer.SetChecks(checks);
 
 	// read the header
 	auto header = DeserializeHeader(deserializer);

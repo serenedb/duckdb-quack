@@ -91,6 +91,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          LogicalType::UBIGINT, Value::UBIGINT(QUACK_PREPARE_INLINE_ROWS_DEFAULT), nullptr,
 	                          SetScope::GLOBAL);
 
+	config.AddExtensionOption("quack_check_peer_data",
+	                          "Check every batch a peer sends: its indexes, offsets and lengths, and on a server its "
+	                          "values too. Turn it off only when every peer is trusted",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(true), nullptr, SetScope::GLOBAL);
+
 	config.AddExtensionOption("quack_fetch_read_ahead",
 	                          "FETCH requests kept in flight ahead of the scan (0 = number of async threads)",
 	                          LogicalType::UBIGINT, Value::UBIGINT(0));

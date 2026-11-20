@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "duckdb/common/serializer/deserializer.hpp"
 #include "duckdb/common/typedefs.hpp"
 
 namespace duckdb {
@@ -40,5 +41,9 @@ inline idx_t QuackDebugSetting(ClientContext &, const char *) {
 
 //! Resolve the server budget for each FETCH or INSERT stream buffer. 0 = no byte limit.
 idx_t QuackServerStreamBufferBytes(DatabaseInstance &db);
+
+//! The checks a peer's batches get: `checks`, unless quack_check_peer_data is off. The value is the global one, so
+//! the session of a server's client cannot turn them off
+DeserializationChecks QuackPeerDataChecks(DatabaseInstance &db, DeserializationChecks checks);
 
 } // namespace duckdb
