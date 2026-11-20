@@ -28,13 +28,17 @@ insert into local_src values (2, 999)
 # --- a fully remote MERGE is shipped whole ---
 
 # no local merge operator, a quack query instead
-# note: EXPLAIN binds the pushed statement and the server executes on PREPARE, so this merge does run
 query II
 explain merge into rpc.target t using rpc.source s on t.k = s.k
   when matched then update set v = s.v
   when not matched then insert values (s.k, s.v)
 ----
-physical_plan	<REGEX>:.*Quack Query.*
+physical_plan	<REGEX>:.*QUACK_QUERY.*
+
+statement ok
+merge into rpc.target t using rpc.source s on t.k = s.k
+  when matched then update set v = s.v
+  when not matched then insert values (s.k, s.v)
 
 query II
 select k, v from rpc.target order by k
@@ -164,7 +168,7 @@ select k, v from local_tgt order by k
 query II
 explain merge into local_tgt t using local_src s on t.k = s.k when matched then update set v = s.v
 ----
-physical_plan	<!REGEX>:.*Quack Query.*
+physical_plan	<!REGEX>:.*QUACK_QUERY.*
 
 # a remote target with a local source cannot be pushed, and the catalog layer does not support it -
 # the same pre-existing boundary as UPDATE/DELETE on a remote table with local data
@@ -172,5 +176,4 @@ statement error
 merge into rpc.target t using local_src s on t.k = s.k when matched then update set v = s.v
 ----
 
-statement ok quack_db:quack_server_con
-call quack_stop('quack:localhost')
+include test/template/quack_teardown.test_template

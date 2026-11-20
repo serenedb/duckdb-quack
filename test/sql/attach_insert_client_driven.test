@@ -130,10 +130,10 @@ select count(*) from rpc.failed_source;
 # --- a statement that fails on the server stops the client's sends ---
 
 statement ok
-create table rpc.keyed(i bigint primary key);
+create table rpc.keyed(i bigint check (i <> 5));
 
 statement ok
-insert into rpc.keyed values (5);
+insert into rpc.keyed values (6);
 
 statement ok
 create table big_src as select i from range(200000) t(i);
@@ -141,7 +141,7 @@ create table big_src as select i from range(200000) t(i);
 statement ok
 set enable_logging = true; set logging_storage = 'memory'; set logging_level = 'debug';
 
-# The first batch already hits the existing key. The server refuses the sends after that, so the
+# The first batch already holds a row the CHECK refuses. The server refuses the sends after that, so the
 # client does not load all ~100 batches. The delay keeps the sends slower than the server's
 # failure, so the early stop is deterministic.
 statement ok
@@ -150,7 +150,7 @@ set quack_debug_send_delay_ms=5;
 statement error
 insert into rpc.keyed select i from big_src;
 ----
-Duplicate key
+constraint
 
 statement ok
 reset quack_debug_send_delay_ms;
@@ -182,5 +182,4 @@ select * from scan_data_from_quack_client('made-up', NULL::STRUCT(i BIGINT));
 ----
 internal function
 
-statement ok quack_db:quack_server_con
-call quack_stop('quack:localhost')
+include test/template/quack_teardown.test_template

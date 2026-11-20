@@ -5,12 +5,6 @@
 
 namespace duckdb {
 
-QuackUri::QuackUri(const QuackUri &input_p, uint16_t new_port)
-    : ssl(input_p.Ssl()), ipv6(input_p.IPv6()), host(input_p.Host()), port(new_port),
-      ssl_fingerprint(input_p.SslFingerprint()) {
-	uri = CanonicalUri();
-}
-
 string QuackUri::NormalizeFingerprint(const string &fingerprint) {
 	auto trimmed = fingerprint;
 	StringUtil::Trim(trimmed);

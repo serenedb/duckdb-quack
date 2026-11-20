@@ -10,7 +10,6 @@ public:
 	} // orrr
 
 	explicit QuackUri(string uri_p, bool ssl_p = true);
-	QuackUri(const QuackUri &uri, uint16_t new_port);
 
 	string Http() const;
 	string Uri() const {

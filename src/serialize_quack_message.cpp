@@ -56,6 +56,7 @@ void ConnectionResponseMessage::Serialize(Serializer &serializer) const {
 	serializer.WritePropertyWithDefault<string>(2, "server_platform", server_platform);
 	serializer.WritePropertyWithDefault<idx_t>(3, "quack_version", quack_version);
 	serializer.WritePropertyWithDefault<idx_t>(4, "heartbeat_timeout_seconds", heartbeat_timeout_seconds);
+	serializer.WritePropertyWithDefault<idx_t>(16389, "serenedb_storage_version", serenedb_storage_version, 0);
 }
 
 unique_ptr<ConnectionResponseMessage> ConnectionResponseMessage::Deserialize(Deserializer &deserializer) {
@@ -64,6 +65,8 @@ unique_ptr<ConnectionResponseMessage> ConnectionResponseMessage::Deserialize(Des
 	deserializer.ReadPropertyWithDefault<string>(2, "server_platform", result->server_platform);
 	deserializer.ReadPropertyWithDefault<idx_t>(3, "quack_version", result->quack_version);
 	deserializer.ReadPropertyWithDefault<idx_t>(4, "heartbeat_timeout_seconds", result->heartbeat_timeout_seconds);
+	deserializer.ReadPropertyWithExplicitDefault<idx_t>(16389, "serenedb_storage_version",
+	                                                    result->serenedb_storage_version, 0);
 	return result;
 }
 
@@ -76,7 +79,7 @@ unique_ptr<DisconnectMessage> DisconnectMessage::Deserialize(Deserializer &deser
 }
 
 void ErrorResponse::Serialize(Serializer &serializer) const {
-	serializer.WritePropertyWithDefault<string>(1, "message", error.RawMessage());
+	serializer.WritePropertyWithDefault<string>(1, "message", TransferableMessage());
 	serializer.WritePropertyWithDefault<string>(2, "exception_type", ExceptionTypeName());
 	serializer.WritePropertyWithDefault<unordered_map<string, string>>(3, "extra_info", TransferableExtraInfo());
 	serializer.WritePropertyWithDefault<bool>(4, "must_invalidate", must_invalidate);
@@ -147,6 +150,7 @@ void PrepareRequestMessage::Serialize(Serializer &serializer) const {
 	serializer.WritePropertyWithDefault<string>(1, "sql_query", sql_query);
 	serializer.WriteProperty<hugeint_t>(2, "query_uuid", query_uuid);
 	serializer.WritePropertyWithDefault<optional_idx>(3, "inline_rows", inline_rows, optional_idx());
+	serializer.WritePropertyWithDefault<bool>(16388, "describe_only", describe_only, false);
 }
 
 unique_ptr<PrepareRequestMessage> PrepareRequestMessage::Deserialize(Deserializer &deserializer) {
@@ -154,6 +158,7 @@ unique_ptr<PrepareRequestMessage> PrepareRequestMessage::Deserialize(Deserialize
 	deserializer.ReadPropertyWithDefault<string>(1, "sql_query", result->sql_query);
 	deserializer.ReadProperty<hugeint_t>(2, "query_uuid", result->query_uuid);
 	deserializer.ReadPropertyWithExplicitDefault<optional_idx>(3, "inline_rows", result->inline_rows, optional_idx());
+	deserializer.ReadPropertyWithExplicitDefault<bool>(16388, "describe_only", result->describe_only, false);
 	return result;
 }
 
@@ -163,6 +168,7 @@ void PrepareResponseMessage::Serialize(Serializer &serializer) const {
 	serializer.WritePropertyWithDefault<bool>(3, "needs_more_fetch", needs_more_fetch);
 	serializer.WritePropertyWithDefault<vector<unique_ptr<DataChunkWrapper>>>(4, "results", results);
 	serializer.WriteProperty<hugeint_t>(5, "query_uuid", query_uuid);
+	serializer.WritePropertyWithDefault<bool>(16390, "described_only", described_only, false);
 }
 
 unique_ptr<PrepareResponseMessage> PrepareResponseMessage::Deserialize(Deserializer &deserializer) {
@@ -173,6 +179,7 @@ unique_ptr<PrepareResponseMessage> PrepareResponseMessage::Deserialize(Deseriali
 	auto query_uuid = deserializer.ReadProperty<hugeint_t>(5, "query_uuid");
 	auto result = duckdb::unique_ptr<PrepareResponseMessage>(new PrepareResponseMessage(
 	    std::move(result_types), std::move(result_names), std::move(results), needs_more_fetch, query_uuid));
+	deserializer.ReadPropertyWithExplicitDefault<bool>(16390, "described_only", result->described_only, false);
 	return result;
 }
 

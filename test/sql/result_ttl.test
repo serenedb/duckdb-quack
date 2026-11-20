@@ -31,7 +31,7 @@ SELECT i FROM remote.t5 ORDER BY i;
 4
 
 query I quack_db:quack_server_con
-SELECT cached_rows FROM quack_active_connections();
+SELECT cached_rows FROM quack_active_connections() WHERE connection_id <> '{harness}';
 ----
 5
 
@@ -49,7 +49,7 @@ statement ok
 DETACH sweeper;
 
 query II quack_db:quack_server_con
-SELECT count(*), count(cached_rows) FROM quack_active_connections();
+SELECT count(*), count(cached_rows) FROM quack_active_connections() WHERE connection_id <> '{harness}';
 ----
 1	0
 
@@ -73,7 +73,7 @@ statement ok
 CALL quack_clear_cache();
 
 query I quack_db:quack_server_con
-SELECT count(cached_rows) FROM quack_active_connections();
+SELECT count(cached_rows) FROM quack_active_connections() WHERE connection_id <> '{harness}';
 ----
 1
 
@@ -97,7 +97,7 @@ statement ok
 CALL quack_clear_cache();
 
 query I quack_db:quack_server_con
-SELECT count(cached_rows) FROM quack_active_connections();
+SELECT count(cached_rows) FROM quack_active_connections() WHERE connection_id <> '{harness}';
 ----
 1
 
@@ -106,25 +106,26 @@ SELECT count(cached_rows) FROM quack_active_connections();
 statement ok quack_db:quack_server_con
 SET GLOBAL quack_result_ttl = 1;
 
-# Small batches. At the default size the result is one batch, PREPARE inlines it, and the client
-# never sends a FETCH. An expired stream that nobody resumes proves nothing.
+# Small batches. At the default size the result is one batch, which the client holds before it
+# stalls, and no tail is left on the server to expire.
 statement ok quack_db:quack_server_con
 SET GLOBAL quack_target_batch_bytes = 65536;
 
-# Bind-time PREPARE serves the first batch and leaves the tail in the cache; the client then idles.
+# One client thread stalls on the first row, past the TTL, with the tail of the stream left on the
+# server. Resuming the stalled stream then fails instead of returning a truncated result.
 statement ok
-PREPARE p AS SELECT sum(i) FROM quack_query({server}, 'FROM big', token=>'asdf');
+SET threads = 1;
 
-sleep 2 seconds
-
-# Resuming the stalled stream now fails instead of returning a truncated result.
 statement error
-EXECUTE p;
+SELECT sum(i) FROM (
+  SELECT i, sleep_ms(CASE WHEN i = 0 THEN 2000 ELSE 0 END) AS pause
+  FROM quack_query({server}, 'FROM big ORDER BY i', token=>'asdf')
+) WHERE pause IS NULL;
 ----
 Query was interrupted
 
 statement ok
-DEALLOCATE p;
+RESET threads;
 
 statement ok quack_db:quack_server_con
 RESET GLOBAL quack_target_batch_bytes;

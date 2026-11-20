@@ -1,3 +1,2 @@
 statement ok quack_db:quack_server_con
-call quack_stop({server});
-
+disconnect;

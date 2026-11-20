@@ -39,7 +39,7 @@ Conversion Error: Could not convert string 'abc' to INT32
 statement error
 from quack_query({server}, 'select 42', token='wrong-token')
 ----
-Invalid Input Error: Authentication failed
+<REGEX>:Invalid Input Error: [Aa]uthentication failed.*
 
 # over an attached database: an insert rejected by the server surfaces as a constraint error, not as
 # an invalid input error (this one comes back on the SEND_DATA path)
@@ -58,7 +58,10 @@ Constraint Error: CHECK constraint failed
 # raises an IOException (it invalidates the whole instance, with a FatalException, only for the initial
 # database - see SingleFileStorageManager::CheckpointDatabase). Arm the server to fail its next checkpoint:
 statement ok
-from quack_query({server}, 'attach ''{TEST_DIR}/fatal.db'' as f; create table f.t as select 42 i')
+from quack_query({server}, 'attach ''{TEST_DIR}/fatal.db'' as f')
+
+statement ok
+from quack_query({server}, 'create table f.t as select 42 i')
 
 statement ok
 from quack_query({server}, 'pragma debug_checkpoint_abort=''before_header''')

@@ -2,7 +2,6 @@ add_subdirectory(storage)
 
 add_library(
   quack_library OBJECT
-  quack_active_connections.cpp
   quack_rebalancer_core.cpp
   quack_rebalancer_sink.cpp
   quack_fetch_collector.cpp
@@ -10,19 +9,14 @@ add_library(
   quack_client.cpp
   quack_extension.cpp
   quack_fetch_ahead.cpp
-  quack_http_server.cpp
   quack_log.cpp
   quack_message.cpp
   quack_random.cpp
-  quack_result_cache.cpp
   quack_scan.cpp
   quack_scan_from_client.cpp
   quack_secret.cpp
   quack_send_data.cpp
-  quack_server.cpp
   quack_settings.cpp
-  quack_ssl_key_generator.cpp
-  quack_start_stop.cpp
   quack_storage.cpp
   quack_uri.cpp
   quack_cancel.cpp

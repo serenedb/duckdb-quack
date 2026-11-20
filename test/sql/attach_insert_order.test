@@ -29,13 +29,13 @@ select count(*), min(i), max(i) from rpc.t_scan;
 300000	0	299999
 
 query I
-select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_scan) where i != rn;
+select count(*) from (select i, row_number() over (order by i) - 1 as rn from rpc.t_scan) where i != rn;
 ----
 0
 
 # First stored row must be 0.
 query I
-select i from (select i, row_number() over () as rn from rpc.t_scan) where rn = 1;
+select i from (select i, row_number() over (order by i) as rn from rpc.t_scan) where rn = 1;
 ----
 0
 
@@ -48,7 +48,7 @@ statement ok
 insert into rpc.t_range select * from range(300000) t(i);
 
 query I
-select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_range) where i != rn;
+select count(*) from (select i, row_number() over (order by i) - 1 as rn from rpc.t_range) where i != rn;
 ----
 0
 
@@ -63,7 +63,7 @@ statement ok
 insert into rpc.t_parq select i from read_parquet('{TEST_DIR}/ord.parquet');
 
 query I
-select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_parq) where i != rn;
+select count(*) from (select i, row_number() over (order by i) - 1 as rn from rpc.t_parq) where i != rn;
 ----
 0
 
@@ -83,7 +83,7 @@ statement ok
 insert into rpc.t_split select i from src;
 
 query I
-select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_split) where i != rn;
+select count(*) from (select i, row_number() over (order by i) - 1 as rn from rpc.t_split) where i != rn;
 ----
 0
 
@@ -125,7 +125,7 @@ select count(*), (select count(*) from src where i < 150000) from rpc.t_filt;
 150000	150000
 
 query I
-select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_filt) where i != rn;
+select count(*) from (select i, row_number() over (order by i) - 1 as rn from rpc.t_filt) where i != rn;
 ----
 0
 
@@ -149,7 +149,7 @@ select count(*), min(i), max(i) from rpc.t_gap;
 
 # rows land in source order across the gap: 0..4095 then 200000..204095
 query I
-select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_gap)
+select count(*) from (select i, row_number() over (order by i) - 1 as rn from rpc.t_gap)
 where (rn < 4096 and i != rn) or (rn >= 4096 and i != rn + 195904);
 ----
 0
@@ -180,7 +180,7 @@ select count(*), min(i), max(i) from rpc.t_lead;
 8192	50000	154095
 
 query I
-select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_lead)
+select count(*) from (select i, row_number() over (order by i) - 1 as rn from rpc.t_lead)
 where (rn < 4096 and i != rn + 50000) or (rn >= 4096 and i != rn + 145904);
 ----
 0
@@ -198,7 +198,7 @@ select count(*), min(i), max(i) from rpc.t_alt;
 12288	0	204095
 
 query I
-select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_alt)
+select count(*) from (select i, row_number() over (order by i) - 1 as rn from rpc.t_alt)
 where (rn < 4096 and i != rn) or (rn >= 4096 and rn < 8192 and i != rn + 95904) or (rn >= 8192 and i != rn + 191808);
 ----
 0
@@ -216,7 +216,7 @@ statement ok
 insert into rpc.t_at select i from src;
 
 query I
-select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_at) where i != rn;
+select count(*) from (select i, row_number() over (order by i) - 1 as rn from rpc.t_at) where i != rn;
 ----
 0
 
@@ -233,7 +233,7 @@ statement ok
 create table rpc.t_ctas as select i from src;
 
 query I
-select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_ctas) where i != rn;
+select count(*) from (select i, row_number() over (order by i) - 1 as rn from rpc.t_ctas) where i != rn;
 ----
 0
 
@@ -282,7 +282,7 @@ select count(*), min(i), max(i) from rpc.t_race;
 8192	0	204095
 
 query I
-select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_race)
+select count(*) from (select i, row_number() over (order by i) - 1 as rn from rpc.t_race)
 where (rn < 4096 and i != rn) or (rn >= 4096 and i != rn + 195904);
 ----
 0
@@ -308,7 +308,7 @@ statement ok
 insert into rpc.t_jitter select i from src;
 
 query I
-select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_jitter) where i != rn;
+select count(*) from (select i, row_number() over (order by i) - 1 as rn from rpc.t_jitter) where i != rn;
 ----
 0
 
@@ -319,7 +319,7 @@ statement ok
 insert into rpc.t_jitter_parq select i from read_parquet('{TEST_DIR}/ord.parquet');
 
 query I
-select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_jitter_parq) where i != rn;
+select count(*) from (select i, row_number() over (order by i) - 1 as rn from rpc.t_jitter_parq) where i != rn;
 ----
 0
 
@@ -387,7 +387,7 @@ select count(*), min(i), max(i) from rpc.t_dup;
 300000	0	299999
 
 query I
-select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_dup) where i != rn;
+select count(*) from (select i, row_number() over (order by i) - 1 as rn from rpc.t_dup) where i != rn;
 ----
 0
 
@@ -439,7 +439,7 @@ select count(*), min(i), max(i) from rpc.t_gate;
 300000	0	299999
 
 query I
-select count(*) from (select i, row_number() over () - 1 as rn from rpc.t_gate) where i != rn;
+select count(*) from (select i, row_number() over (order by i) - 1 as rn from rpc.t_gate) where i != rn;
 ----
 0
 

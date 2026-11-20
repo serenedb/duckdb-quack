@@ -6,11 +6,21 @@ require tpch
 
 include test/template/quack_setup.test_template
 
-statement ok quack_db:quack_server_con
+statement ok
 call dbgen(sf=1);
 
 statement ok
 attach {server} as rpc (token 'asdf')
+
+foreach tbl lineitem orders partsupp part customer supplier nation region
+
+statement ok
+create table rpc.{server_schema}.${tbl} as from ${tbl};
+
+statement ok
+drop table ${tbl};
+
+endloop
 
 statement ok
 use rpc
@@ -20,7 +30,7 @@ loop i 1 9
 query I
 PRAGMA tpch({i})
 ----
-<FILE>:extension/tpch/dbgen/answers/sf1/q0{i}.csv
+<FILE>:../duckdb/extension/tpch/dbgen/answers/sf1/q0{i}.csv
 
 endloop
 
@@ -29,7 +39,7 @@ loop i 10 23
 query I
 PRAGMA tpch({i})
 ----
-<FILE>:extension/tpch/dbgen/answers/sf1/q{i}.csv
+<FILE>:../duckdb/extension/tpch/dbgen/answers/sf1/q{i}.csv
 
 endloop
 

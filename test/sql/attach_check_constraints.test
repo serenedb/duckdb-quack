@@ -1,0 +1,58 @@
+# name: test/sql/attach_check_constraints.test
+# description: attach a catalog whose tables have CHECK constraints, which the server enforces
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok quack_db:quack_server_con
+create table builtin_check (i INTEGER CHECK (abs(i) < 10))
+
+# the CHECK calls a macro only the server has
+statement ok quack_db:quack_server_con
+create schema s
+
+statement ok quack_db:quack_server_con
+create macro s.pos(x) as x > 0
+
+statement ok quack_db:quack_server_con
+set search_path = 's'
+
+statement ok quack_db:quack_server_con
+create table s.server_check (i INTEGER CHECK (pos(i)))
+
+statement ok quack_db:quack_server_con
+reset search_path
+
+statement ok
+attach {server} as remote (token 'asdf')
+
+statement ok
+insert into remote.builtin_check values (7)
+
+statement error
+insert into remote.builtin_check values (70)
+----
+CHECK constraint
+
+statement ok
+insert into remote.s.server_check values (7)
+
+statement error
+insert into remote.s.server_check values (-7)
+----
+CHECK constraint
+
+query I
+from remote.builtin_check
+----
+7
+
+query I
+from remote.s.server_check
+----
+7
+
+statement ok
+detach remote
+
+include test/template/quack_teardown.test_template

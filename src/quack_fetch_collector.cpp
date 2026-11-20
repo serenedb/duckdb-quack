@@ -25,7 +25,8 @@ struct QuackPreparedFetchBatch : public QuackPreparedBatch {
 //! The accumulation buffer IS the wire body: the FETCH handler writes the header and replies.
 class QuackFetchFragmentBuilder : public QuackFragmentBuilder {
 public:
-	explicit QuackFetchFragmentBuilder(idx_t size_hint) : writer(make_uniq<QuackChunkPayloadWriter>(size_hint)) {
+	QuackFetchFragmentBuilder(idx_t size_hint, StorageVersion wire_version)
+	    : writer(make_uniq<QuackChunkPayloadWriter>(size_hint, wire_version)) {
 	}
 
 	void Append(ClientContext &context, DataChunk &chunk) override {
@@ -67,7 +68,7 @@ public:
 	}
 
 	unique_ptr<QuackFragmentBuilder> OpenFragment(ClientContext &context, idx_t size_hint) override {
-		return make_uniq<QuackFetchFragmentBuilder>(size_hint);
+		return make_uniq<QuackFetchFragmentBuilder>(size_hint, stream->wire_version);
 	}
 
 	//! NO_CAPACITY leaves the batch with the caller. A retry pushes the same batch again, which is
@@ -89,9 +90,8 @@ public:
 	}
 
 	optional_idx Finish(ClientContext &context, idx_t total_batches) override {
-		// Do NOT finish the buffer here. The claimed statement can sit in the middle of a
-		// multi-statement query, and the client must not see the stream end while more statements run.
-		// DriveQuery closes the stream, and it checks the count against this total.
+		// Do NOT finish the buffer here. The statement runner closes the stream once the statement ended, and
+		// it checks the count against this total.
 		stream->announced_total = total_batches;
 		return optional_idx();
 	}
@@ -117,7 +117,7 @@ public:
 
 public:
 	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const override {
-		auto debug_delay_ms = QuackGetUBigintSetting(context, "quack_debug_emit_delay_ms", 0);
+		auto debug_delay_ms = QuackDebugSetting(context, "quack_debug_emit_delay_ms");
 		auto emitter = make_uniq<QuackFetchBufferEmitter>(stream, debug_delay_ms);
 		auto state = MakeQuackRebalancerGlobalState(context, types, order_mode, std::move(emitter));
 		state->client_context = context.shared_from_this();
@@ -192,11 +192,7 @@ unique_ptr<PhysicalOperator> MakeQuackFetchCollector(ClientContext &context, Pre
 		order_mode = AppendOrderMode::SERIAL_ORDERED;
 	}
 
-	vector<string> result_names;
-	for (auto &name : data.names) {
-		result_names.push_back(name.GetIdentifierName());
-	}
-	stream->SignalBound(data.types, std::move(result_names));
+	stream->SignalBound(data.types, data.names, false);
 	return make_uniq<QuackFetchCollector>(physical_plan, data, std::move(stream), order_mode);
 }
 

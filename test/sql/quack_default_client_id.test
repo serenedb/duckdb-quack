@@ -21,7 +21,7 @@ statement ok
 attach {server} as rpc_def (token 'asdf');
 
 query I quack_db:quack_server_con
-SELECT count(*) FILTER (WHERE client_id_hash IS NOT NULL) FROM quack_active_connections();
+SELECT count(*) FILTER (WHERE client_id_hash IS NOT NULL) FROM (FROM quack_active_connections() WHERE connection_id <> '{harness}');
 ----
 1
 
@@ -31,7 +31,7 @@ attach {server} as rpc_exp (token 'asdf', client_id 'auto_default_client');
 
 query II quack_db:quack_server_con
 SELECT count(*) FILTER (WHERE client_id_hash IS NOT NULL), count(DISTINCT client_id_hash)
-  FROM quack_active_connections() WHERE client_id_hash IS NOT NULL;
+  FROM (FROM quack_active_connections() WHERE connection_id <> '{harness}') WHERE client_id_hash IS NOT NULL;
 ----
 2	1
 
@@ -46,7 +46,7 @@ statement ok
 attach {server} as rpc_optout (token 'asdf', client_id '');
 
 query I quack_db:quack_server_con
-SELECT count(*) FILTER (WHERE client_id_hash IS NOT NULL) FROM quack_active_connections();
+SELECT count(*) FILTER (WHERE client_id_hash IS NOT NULL) FROM (FROM quack_active_connections() WHERE connection_id <> '{harness}');
 ----
 0
 
@@ -61,7 +61,7 @@ statement ok
 attach {server} as rpc_none (token 'asdf');
 
 query I quack_db:quack_server_con
-SELECT count(*) FILTER (WHERE client_id_hash IS NOT NULL) FROM quack_active_connections();
+SELECT count(*) FILTER (WHERE client_id_hash IS NOT NULL) FROM (FROM quack_active_connections() WHERE connection_id <> '{harness}');
 ----
 0
 

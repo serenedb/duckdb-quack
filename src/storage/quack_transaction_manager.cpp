@@ -27,9 +27,7 @@ ErrorData QuackTransactionManager::CommitTransaction(ClientContext &context, Tra
 	} catch (...) {
 		error = ErrorData("Server COMMIT failed");
 	}
-	if (error.HasError()) {
-		quack_catalog.InvalidateIfChangedSince(quack_transaction.StartVersion());
-	}
+	quack_catalog.InvalidateIfChangedSince(quack_transaction.StartVersion());
 	DestroyTransaction(transaction);
 	return error;
 }

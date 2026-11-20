@@ -72,7 +72,7 @@ statement ok
 create or replace table local_ctas as from quack_query({server}, 'select i, pad from big order by i', token='asdf');
 
 query I
-select count(*) from (select i, row_number() over () - 1 rn from local_ctas) where i != rn
+select count(*) from (select i, row_number() over (order by i) - 1 rn from local_ctas) where i != rn
 ----
 0
 
@@ -82,7 +82,7 @@ statement ok
 create or replace table ordered_ctas as select i, pad from rpc.big500;
 
 query I
-select count(*) from (select i, row_number() over () - 1 rn from ordered_ctas) where i != rn
+select count(*) from (select i, row_number() over (order by i) - 1 rn from ordered_ctas) where i != rn
 ----
 0
 
@@ -91,7 +91,7 @@ statement ok
 create or replace table ordered_ctas_pq as select i, pad from rpc.big_pq;
 
 query I
-select count(*) from (select i, row_number() over () - 1 rn from ordered_ctas_pq) where i != rn
+select count(*) from (select i, row_number() over (order by i) - 1 rn from ordered_ctas_pq) where i != rn
 ----
 0
 
@@ -143,7 +143,7 @@ statement ok
 create or replace table delayed_ctas as select i, pad from rpc.big500;
 
 query I
-select count(*) from (select i, row_number() over () - 1 rn from delayed_ctas) where i != rn
+select count(*) from (select i, row_number() over (order by i) - 1 rn from delayed_ctas) where i != rn
 ----
 0
 

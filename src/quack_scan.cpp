@@ -3,7 +3,6 @@
 #include "duckdb/main/query_result.hpp"
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/main/secret/secret.hpp"
-#include "duckdb/planner/filter/conjunction_filter.hpp"
 #include "duckdb/planner/table_filter.hpp"
 
 #include "quack_scan.hpp"
@@ -14,6 +13,52 @@
 
 #include <queue>
 namespace duckdb {
+
+//! Run `query` for `bind_data` on `connection`, or with `describe_only` ask for its columns only
+static unique_ptr<PrepareResponseMessage> RunRemoteQuery(ClientContext &context, const QuackScanBindData &bind_data,
+                                                         QuackClientConnection &connection, string query,
+                                                         hugeint_t query_uuid, bool describe_only = false) {
+	if (bind_data.use_transaction) {
+		QuackTransaction::Get(context, QuackCatalog::GetQuackCatalog(context, bind_data.catalog_name)).ForceStart();
+	}
+	auto prepare = connection.MakePrepare(std::move(query), query_uuid);
+	prepare->SetDescribeOnly(describe_only);
+	return connection.Prepare(context, std::move(prepare));
+}
+
+//! The query was a statement pushed down by the RemotePushdownOptimizer, and the server ran it (PREPARE runs the
+//! query), so the snapshot of the remote catalog is out of date
+static void InvalidateCatalog(ClientContext &context, const QuackScanBindData &bind_data) {
+	QuackCatalog::GetQuackCatalog(context, bind_data.catalog_name).Invalidate();
+}
+
+//! Learn the query's columns from the server. A server that cannot describe it runs it, and the first execution
+//! then reads that result.
+static void BindRemoteQuery(ClientContext &context, QuackScanBindData &bind_data, vector<LogicalType> &return_types,
+                            vector<Identifier> &names) {
+	auto describe = bind_data.client_connection->SereneDBPeer();
+	auto bind_response = RunRemoteQuery(context, bind_data, *bind_data.client_connection, bind_data.query,
+	                                    UUID::GenerateRandomUUID(), describe);
+	if (!bind_response->DescribedOnly()) {
+		bind_data.bind_result = make_shared_ptr<QuackBindResult>(
+		    bind_data.client_connection, bind_data.client_connection->StatementsStarted(),
+		    std::move(bind_response->MutableResults()), bind_response->NeedsMoreFetch(), bind_response->QueryUUID());
+	}
+
+	return_types = bind_response->Types();
+	bind_data.column_types = return_types;
+	for (auto &col_name : bind_response->Names()) {
+		names.push_back(Identifier(col_name));
+	}
+	// the remote query may produce duplicate column names (e.g. SELECT 1 AS x, 2 AS x) - a table
+	// function binding requires unique names, so rename the repeats (x, x_1, ...). Columns are
+	// referenced positionally everywhere below, so this is purely the name we expose to the binder.
+	QueryResult::DeduplicateColumns(names);
+
+	if (bind_data.bind_result && bind_data.refresh_catalog) {
+		InvalidateCatalog(context, bind_data);
+	}
+}
 
 static unique_ptr<FunctionData> QuackScanBind(ClientContext &context, TableFunctionBindInput &input,
                                               vector<LogicalType> &return_types, vector<Identifier> &names) {
@@ -64,29 +109,11 @@ static unique_ptr<FunctionData> QuackScanBind(ClientContext &context, TableFunct
 	auto heartbeat_timeout = QuackClient::ResolveHeartbeatTimeout(
 	    context, heartbeat_timeout_entry != input.named_parameters.end() ? &heartbeat_timeout_entry->second : nullptr);
 	bind_data->client_connection =
-	    QuackClient::ConnectToServer(context, server_uri, token, std::move(client_id), heartbeat_timeout);
-	auto &client_connection = *bind_data->client_connection;
-
-	auto client_wrapper = client_connection.GetClient(context);
-	auto &client = client_wrapper->GetClient();
-
-	bind_data->query_uuid = UUID::GenerateRandomUUID();
-	auto bind_response = client.Request<PrepareResponseMessage>(
-	    context, make_uniq<PrepareRequestMessage>(client_connection.ConnectionId(), query, bind_data->query_uuid));
-
-	return_types = bind_response->Types();
-	for (auto &col_name : bind_response->Names()) {
-		names.push_back(Identifier(col_name));
-	}
-	// the remote query may produce duplicate column names (e.g. SELECT 1 AS x, 2 AS x) - a table
-	// function binding requires unique names, so rename the repeats (x, x_1, ...). Columns are
-	// referenced positionally everywhere below, so this is purely the name we expose to the binder.
-	QueryResult::DeduplicateColumns(names);
-
-	bind_data->results = std::move(bind_response->MutableResults());
-	bind_data->needs_more_fetch = bind_response->NeedsMoreFetch();
-	bind_data->query_uuid = bind_response->QueryUUID();
-
+	    QuackClient::ConnectToServer(context, server_uri, token, client_id, heartbeat_timeout);
+	bind_data->session = make_shared_ptr<QuackScanSession>(bind_data->client_connection, server_uri, std::move(token),
+	                                                       std::move(client_id), heartbeat_timeout);
+	bind_data->query = std::move(query);
+	BindRemoteQuery(context, *bind_data, return_types, names);
 	return bind_data;
 }
 
@@ -114,38 +141,13 @@ static unique_ptr<FunctionData> QuackScanBindCatalogName(ClientContext &context,
 	}
 
 	auto &catalog = QuackCatalog::GetQuackCatalog(context, input.inputs[0]);
-	if (use_transaction) {
-		// start a transaction if "use_transaction" is specified
-		auto &transaction = QuackTransaction::Get(context, catalog);
-		transaction.ForceStart();
-	}
-
-	// TODO some of this stuff below is duplicated af
-	auto query = input.inputs[1].GetValue<string>();
 	auto bind_data = make_uniq<QuackScanBindData>();
-	bind_data->client_connection = catalog.GetClientConnection();
-	auto client_wrapper = bind_data->client_connection->GetClient(context);
-	auto &client = client_wrapper->GetClient();
-	bind_data->query_uuid = UUID::GenerateRandomUUID();
-	auto bind_response = client.Request<PrepareResponseMessage>(
-	    context,
-	    make_uniq<PrepareRequestMessage>(bind_data->client_connection->ConnectionId(), query, bind_data->query_uuid));
-
-	return_types = bind_response->Types();
-	for (auto &col_name : bind_response->Names()) {
-		names.push_back(Identifier(col_name));
-	}
-	QueryResult::DeduplicateColumns(names);
-
-	// new stuff
-	bind_data->results = std::move(bind_response->MutableResults());
-	bind_data->needs_more_fetch = bind_response->NeedsMoreFetch();
-	bind_data->query_uuid = bind_response->QueryUUID();
-	if (refresh_catalog) {
-		// the query was a statement pushed down by the RemotePushdownOptimizer - the server has already
-		// executed it (PREPARE runs the query), so our snapshot of the remote catalog is out of date
-		catalog.Invalidate();
-	}
+	bind_data->client_connection = catalog.GetClientConnection(context);
+	bind_data->query = input.inputs[1].GetValue<string>();
+	bind_data->catalog_name = input.inputs[0];
+	bind_data->use_transaction = use_transaction;
+	bind_data->refresh_catalog = refresh_catalog;
+	BindRemoteQuery(context, *bind_data, return_types, names);
 	return bind_data;
 }
 
@@ -222,6 +224,10 @@ struct QuackScanGlobalState : GlobalTableFunctionState {
 		return std::move(results);
 	}
 
+	shared_ptr<QuackClientConnection> connection;
+	//! The bind's result this execution reads, if it took it
+	shared_ptr<QuackBindResult> bind_result;
+
 private:
 	mutex lock;
 	vector<ChunkResult> results;
@@ -265,54 +271,72 @@ static bool ReconnectsEnabled(ClientContext &context) {
 	return val.GetValue<bool>();
 }
 
+//! The session a run of the scan uses. A prepared scan runs long after its bind, when the server may have lost the
+//! bind's session: the attached database has a new one then, and a scan with its own connection opens it again.
+static shared_ptr<QuackClientConnection> ScanConnection(ClientContext &context, const QuackScanBindData &bind_data) {
+	if (!bind_data.catalog_name.IsNull()) {
+		auto &catalog = QuackCatalog::GetQuackCatalog(context, bind_data.catalog_name);
+		// a run that binds nothing joins the statement's transaction here, which forgets a session the server lost
+		QuackTransaction::Get(context, catalog);
+		return catalog.GetClientConnection(context);
+	}
+	return bind_data.session->Get(context);
+}
+
+//! The scan's state over its first rows. With more to fetch, the scan runs in parallel and the FETCH requests start
+//! before the first scan call.
+static unique_ptr<QuackScanGlobalState> MakeGlobalState(ClientContext &context, TableFunctionInitInput &input,
+                                                        shared_ptr<QuackClientConnection> connection,
+                                                        vector<unique_ptr<DataChunkWrapper>> &chunks,
+                                                        bool needs_more_fetch, hugeint_t query_uuid,
+                                                        ChunkResultPushdownType pushdown_type) {
+	vector<ChunkResult> results;
+	for (auto &chunk_ref : chunks) {
+		results.emplace_back(chunk_ref->Chunk(), pushdown_type);
+	}
+	auto global_state =
+	    make_uniq<QuackScanGlobalState>(input.column_indexes, input.projection_ids, std::move(results),
+	                                    needs_more_fetch, query_uuid, ReconnectsEnabled(context), pushdown_type);
+	if (needs_more_fetch) {
+		global_state->fetcher =
+		    make_shared_ptr<QuackFetcher>(context, *connection, query_uuid, QuackFetcher::GetReadAheadDepth(context));
+	}
+	global_state->connection = std::move(connection);
+	return global_state;
+}
+
 unique_ptr<GlobalTableFunctionState> QuackScanInitGlobal(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind_data = input.bind_data->Cast<QuackScanBindData>();
+	auto connection = ScanConnection(context, bind_data);
+	auto table_scan = !bind_data.qualified_table_name.Path().empty();
+	auto &bind_result = bind_data.bind_result;
+	if (!table_scan && bind_result && bind_result->Take(connection, bind_data.use_transaction)) {
+		auto global_state =
+		    MakeGlobalState(context, input, std::move(connection), bind_result->results, bind_result->needs_more_fetch,
+		                    bind_result->query_uuid, ChunkResultPushdownType::REQUIRES_PUSHDOWN);
+		global_state->bind_result = bind_result;
+		return global_state;
+	}
 
-	// For the catalog path (ATTACH), LookupEntry only prepares without executing
-	// to avoid the server-side result being overwritten by subsequent lookups.
-	// We execute the query here, right before scanning, so the result is fresh.
-	vector<ChunkResult> results;
-	bool needs_more_fetch = bind_data.needs_more_fetch;
-	hugeint_t query_uuid;
 	// The chunks are already projected only if the query we send carries the projection, which is
 	// exactly when BuildPushdownQuery emits a SELECT list - it degrades to a full-width
 	// "FROM <table>" on an empty column_indexes.
-	auto fetch_pushdown_type = ChunkResultPushdownType::REQUIRES_PUSHDOWN;
-	if (!bind_data.qualified_table_name.Path().empty()) {
-		// apply pushdown to the query
-		auto query = BuildPushdownQuery(bind_data, input);
-		if (!input.column_indexes.empty()) {
-			fetch_pushdown_type = ChunkResultPushdownType::PUSHDOWN_ALREADY_APPLIED;
+	auto pushdown_type = table_scan && !input.column_indexes.empty() ? ChunkResultPushdownType::PUSHDOWN_ALREADY_APPLIED
+	                                                                 : ChunkResultPushdownType::REQUIRES_PUSHDOWN;
+	auto query = table_scan ? BuildPushdownQuery(bind_data, input) : bind_data.query;
+	auto query_uuid = UUID::GenerateRandomUUID();
+	auto response = RunRemoteQuery(context, bind_data, *connection, std::move(query), query_uuid);
+	if (!table_scan) {
+		if (response->Types() != bind_data.column_types) {
+			throw InvalidInputException("The result of the remote query \"%s\" changed its types since it was bound",
+			                            bind_data.query);
 		}
-		auto &client_connection = *bind_data.client_connection;
-		auto client_wrapper = client_connection.GetClient(context);
-		auto &client = client_wrapper->GetClient();
-		query_uuid = UUID::GenerateRandomUUID();
-		auto response_message = client.Request<PrepareResponseMessage>(
-		    context, make_uniq<PrepareRequestMessage>(client_connection.ConnectionId(), query, query_uuid));
-		needs_more_fetch = response_message->NeedsMoreFetch();
-		// fetch the result
-		for (auto &chunk_ref : response_message->MutableResults()) {
-			auto &chunk = chunk_ref->Chunk();
-			results.emplace_back(chunk, fetch_pushdown_type);
+		if (bind_data.refresh_catalog) {
+			InvalidateCatalog(context, bind_data);
 		}
-	} else {
-		for (auto &chunk_ref : bind_data.results) {
-			auto &chunk = chunk_ref->Chunk();
-			results.emplace_back(chunk, fetch_pushdown_type);
-		}
-		query_uuid = bind_data.query_uuid;
 	}
-	// we only multithread if there is more to fetch
-	auto global_state =
-	    make_uniq<QuackScanGlobalState>(input.column_indexes, input.projection_ids, std::move(results),
-	                                    needs_more_fetch, query_uuid, ReconnectsEnabled(context), fetch_pushdown_type);
-	if (needs_more_fetch) {
-		// start pipelining FETCH requests on the ASYNC pool before the first scan call
-		global_state->fetcher = make_shared_ptr<QuackFetcher>(context, *bind_data.client_connection, query_uuid,
-		                                                      QuackFetcher::GetReadAheadDepth(context));
-	}
-	return std::move(global_state);
+	return MakeGlobalState(context, input, std::move(connection), response->MutableResults(),
+	                       response->NeedsMoreFetch(), query_uuid, pushdown_type);
 }
 
 unique_ptr<LocalTableFunctionState> QuackScanInitLocal(ExecutionContext &context, TableFunctionInitInput &input,
@@ -329,16 +353,15 @@ unique_ptr<LocalTableFunctionState> QuackScanInitLocal(ExecutionContext &context
 	return local_state;
 }
 
-static void SendAcknowledgement(ClientContext &context, QuackScanGlobalState &global_state,
-                                QuackScanBindData &bind_data) {
+static void SendAcknowledgement(ClientContext &context, QuackScanGlobalState &global_state) {
 	if (global_state.ack_sent.exchange(true)) {
 		return;
 	}
 	try {
-		auto client_wrapper = bind_data.client_connection->GetClient(context);
+		auto client_wrapper = global_state.connection->GetClient(context);
 		client_wrapper->GetClient().Request<SuccessResponse>(
 		    context,
-		    make_uniq<AcknowledgementMessage>(bind_data.client_connection->ConnectionId(), global_state.query_uuid));
+		    make_uniq<AcknowledgementMessage>(global_state.connection->ConnectionId(), global_state.query_uuid));
 	} catch (const std::exception &e) {
 		// The query is already complete, so we swallow the failure rather than fail the query
 		DUCKDB_LOG_WARNING(
@@ -347,9 +370,10 @@ static void SendAcknowledgement(ClientContext &context, QuackScanGlobalState &gl
 	}
 }
 
-static void FinishScan(ClientContext &context, QuackScanGlobalState &global_state, QuackScanLocalState &local_state,
-                       QuackScanBindData &bind_data) {
-	bind_data.completed = true;
+static void FinishScan(ClientContext &context, QuackScanGlobalState &global_state, QuackScanLocalState &local_state) {
+	if (global_state.bind_result) {
+		global_state.bind_result->completed = true;
+	}
 	if (local_state.finish_reported) {
 		return;
 	}
@@ -363,11 +387,10 @@ static void FinishScan(ClientContext &context, QuackScanGlobalState &global_stat
 	if (global_state.fetcher) {
 		global_state.fetcher->StopAndDrain();
 	}
-	SendAcknowledgement(context, global_state, bind_data);
+	SendAcknowledgement(context, global_state);
 }
 
 static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
-	auto &bind_data = input.bind_data->CastNoConst<QuackScanBindData>();
 	auto &global_state = input.global_state->Cast<QuackScanGlobalState>();
 	auto &local_state = input.local_state->Cast<QuackScanLocalState>();
 
@@ -434,14 +457,14 @@ static void QuackScan(ClientContext &context, TableFunctionInput &input, DataChu
 			case QuackFetchResult::FINISHED:
 				// server is done, this thread is done
 				local_state.fetch_exhausted = true;
-				FinishScan(context, global_state, local_state, bind_data);
+				FinishScan(context, global_state, local_state);
 				return;
 			case QuackFetchResult::BLOCKED:
 				return;
 			}
 		}
 		// we did not have anything cached and then request to the server did not yield anything - we are done
-		FinishScan(context, global_state, local_state, bind_data);
+		FinishScan(context, global_state, local_state);
 		break;
 	}
 }
@@ -482,9 +505,11 @@ static virtual_column_map_t QuackGetVirtualColumns(ClientContext &, optional_ptr
 	return result;
 }
 
-optional_ptr<TableCatalogEntry> QuackScanGetTableEntry(optional_ptr<const FunctionData> bind_data_p) {
+static BindInfo QuackScanGetBindInfo(const optional_ptr<FunctionData> bind_data_p) {
 	auto &bind_data = bind_data_p->Cast<QuackScanBindData>();
-	return bind_data.table_entry;
+	BindInfo info(ScanType::EXTERNAL);
+	info.table = bind_data.table_entry;
+	return info;
 }
 
 TableFunction QuackScanFunction::GetFunction() {
@@ -507,7 +532,7 @@ TableFunction QuackScanFunction::GetFunction() {
 	fun.serialize = QuackScanSerialize;
 	fun.deserialize = QuackScanDeserialize;
 	fun.get_virtual_columns = QuackGetVirtualColumns;
-	fun.get_table_entry = QuackScanGetTableEntry;
+	fun.get_bind_info = QuackScanGetBindInfo;
 	// fun.filter_pushdown = true;
 	// fun.filter_prune = true;
 	return fun;
@@ -528,7 +553,7 @@ TableFunction QuackScanByNameFunction::GetFunction() {
 	fun.serialize = QuackScanSerialize;
 	fun.deserialize = QuackScanDeserialize;
 	fun.get_virtual_columns = QuackGetVirtualColumns;
-	fun.get_table_entry = QuackScanGetTableEntry;
+	fun.get_bind_info = QuackScanGetBindInfo;
 	// fun.filter_pushdown = true;
 	// fun.filter_prune = true;
 	return fun;

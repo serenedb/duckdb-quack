@@ -85,7 +85,7 @@ WITH RECURSIVE schema_tree AS (
 	FROM duckdb_schemas() nested
 	JOIN schema_tree parent ON nested.parent_schema_oid = parent.oid
 )
-SELECT oid, database_name, schema_path, current_database()
+SELECT oid, database_name, schema_path, current_database(), current_schema()
 FROM schema_tree
 WHERE database_name NOT IN ('system', 'temp')
 ORDER BY (database_name = current_database()) DESC, database_name, length(schema_path), schema_path
@@ -94,7 +94,7 @@ ORDER BY (database_name = current_database()) DESC, database_name, length(schema
 
 QuackSchemaCatalogEntry::QuackSchemaCatalogEntry(Catalog &catalog_p, CreateSchemaInfo &info_p,
                                                  optional_ptr<SchemaCatalogEntry> parent_schema_p, int64_t remote_oid_p)
-    : SchemaCatalogEntry(catalog_p, info_p), parent_schema(parent_schema_p), remote_oid(remote_oid_p) {
+    : SchemaCatalogEntry(catalog_p, info_p, parent_schema_p), remote_oid(remote_oid_p) {
 	schemas = make_uniq<QuackCatalogSet>(catalog_p.Cast<QuackCatalog>());
 	tables = make_uniq<QuackTableSet>(*this);
 }
@@ -102,7 +102,7 @@ QuackSchemaCatalogEntry::QuackSchemaCatalogEntry(Catalog &catalog_p, CreateSchem
 QuackSchemaCatalogEntry::QuackSchemaCatalogEntry(ClientContext &context, Catalog &catalog_p, CreateSchemaInfo &info_p,
                                                  optional_ptr<SchemaCatalogEntry> parent_schema_p, int64_t remote_oid_p,
                                                  const QuackLoadCatalogData &load_data)
-    : SchemaCatalogEntry(catalog_p, info_p), parent_schema(parent_schema_p), remote_oid(remote_oid_p) {
+    : SchemaCatalogEntry(catalog_p, info_p, parent_schema_p), remote_oid(remote_oid_p) {
 	schemas = make_uniq<QuackCatalogSet>(catalog_p.Cast<QuackCatalog>());
 	tables = make_uniq<QuackTableSet>(context, *this, load_data);
 }

@@ -1,0 +1,88 @@
+# name: test/sql/prepared_execute_twice.test
+# description: every EXECUTE of a prepared statement runs its remote query, not only the first one
+# group: [sql]
+
+include test/template/quack_setup.test_template
+
+statement ok quack_db:quack_server_con
+create table t as select 1 as x
+
+statement ok quack_db:quack_server_con
+create view v as select x from t
+
+statement ok
+attach {server} as rpc (token 'asdf')
+
+statement ok
+PREPARE by_query AS select x from quack_query({server}, 'from t', token='asdf') order by x
+
+# a query of the attached database alone is pushed down whole
+statement ok
+PREPARE pushed AS select x from rpc.public.t order by x
+
+statement ok
+PREPARE by_view AS select x from rpc.public.v order by x
+
+query I
+EXECUTE by_query
+----
+1
+
+query I
+EXECUTE pushed
+----
+1
+
+query I
+EXECUTE by_view
+----
+1
+
+statement ok quack_db:quack_server_con
+insert into t values (2)
+
+query I
+EXECUTE by_query
+----
+1
+2
+
+query I
+EXECUTE pushed
+----
+1
+2
+
+query I
+EXECUTE by_view
+----
+1
+2
+
+# a result of several batches
+statement ok quack_db:quack_server_con
+set global quack_prepare_inline_rows=1
+
+statement ok quack_db:quack_server_con
+set global quack_target_batch_bytes=1
+
+statement ok
+PREPARE batches AS select count(*), sum(x) from quack_query({server}, 'from t', token='asdf')
+
+query II
+EXECUTE batches
+----
+2	3
+
+statement ok quack_db:quack_server_con
+insert into t values (3)
+
+query II
+EXECUTE batches
+----
+3	6
+
+statement ok con2
+detach rpc
+
+include test/template/quack_teardown.test_template

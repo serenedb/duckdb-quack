@@ -8,8 +8,6 @@
 #include "duckdb/parallel/interrupt.hpp"
 #include "duckdb/parallel/scan_read_ahead.hpp"
 
-#include <chrono>
-#include <condition_variable>
 #include <map>
 #include <set>
 
@@ -68,19 +66,21 @@ public:
 
 	//! Publish a batch under its dense index. The call waits until the batch fits. An empty buffer
 	//! and the head of the stream always admit one, so the producer cannot deadlock.
-	void PushBatch(idx_t batch_index, PAYLOAD payload, idx_t bytes = 0) {
+	void PushBatch(idx_t batch_index, PAYLOAD payload, idx_t bytes = 0) DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
 		shared_ptr<ReadAheadJobCompletion> waiter;
+		vector<InterruptState> wakes;
 		{
-			annotated_unique_lock<annotated_mutex> guard(lock);
+			annotated_lock_guard<annotated_mutex> guard(lock);
 			if (Seen(batch_index)) {
 				// a transport retry delivered this batch again
 				return;
 			}
 			// The head of the stream always gets in. Later batches cannot starve the next pop.
-			while (capacity > 0 && buffered_bytes > 0 && buffered_bytes + bytes > capacity && !finished && !errored &&
-			       !HeadOfStream(batch_index)) {
-				cv.wait(guard);
-			}
+			auto fits = [&] DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
+				return capacity == 0 || buffered_bytes == 0 || buffered_bytes + bytes <= capacity || finished ||
+				       errored || HeadOfStream(batch_index);
+			};
+			lock.Await(absl::Condition(&fits));
 			if (finished || errored) {
 				return;
 			}
@@ -88,20 +88,13 @@ public:
 				// a duplicate got in while this push waited
 				return;
 			}
-			RecordSeen(batch_index);
-			batches[batch_index] = Entry {std::move(payload), bytes};
-			buffered_bytes += bytes;
-			pushed_count++;
-			auto entry = waiters.find(batch_index);
-			if (entry != waiters.end()) {
-				waiter = std::move(entry->second);
-				waiters.erase(entry);
-			}
+			waiter = InsertLocked(batch_index, std::move(payload), bytes);
+			wakes = TakeWakers();
 		}
-		cv.notify_all();
 		if (waiter) {
 			waiter->FinishIOTask();
 		}
+		Wake(wakes);
 	}
 
 	//! PushBatch that does not wait. NO_CAPACITY does not touch `payload`, so the caller can park and
@@ -109,8 +102,9 @@ public:
 	QuackPushStatus TryPushBatch(idx_t batch_index, PAYLOAD &payload, idx_t bytes,
 	                             optional_ptr<const InterruptState> interrupt) {
 		shared_ptr<ReadAheadJobCompletion> waiter;
+		vector<InterruptState> wakes;
 		{
-			annotated_unique_lock<annotated_mutex> guard(lock);
+			annotated_lock_guard<annotated_mutex> guard(lock);
 			if (finished || errored) {
 				return QuackPushStatus::DROPPED;
 			}
@@ -124,20 +118,13 @@ public:
 				}
 				return QuackPushStatus::NO_CAPACITY;
 			}
-			RecordSeen(batch_index);
-			batches[batch_index] = Entry {std::move(payload), bytes};
-			buffered_bytes += bytes;
-			pushed_count++;
-			auto entry = waiters.find(batch_index);
-			if (entry != waiters.end()) {
-				waiter = std::move(entry->second);
-				waiters.erase(entry);
-			}
+			waiter = InsertLocked(batch_index, std::move(payload), bytes);
+			wakes = TakeWakers();
 		}
-		cv.notify_all();
 		if (waiter) {
 			waiter->FinishIOTask();
 		}
+		Wake(wakes);
 		return QuackPushStatus::PUSHED;
 	}
 
@@ -160,36 +147,52 @@ public:
 		return completion;
 	}
 
+	//! Fire `state` once, from any thread, at the next change of this buffer (a push, a pop, the end of the stream),
+	//! for a waiter that does not block a thread. A change between the caller's last look and the registration fires
+	//! nothing, so the caller looks again after registering.
+	void AddWaker(const InterruptState &state) {
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		wakers.push_back(state);
+	}
+
+	//! Fire the wakers for a change their owners watch outside this buffer.
+	void NotifyChange() {
+		vector<InterruptState> wakes;
+		{
+			annotated_lock_guard<annotated_mutex> guard(lock);
+			wakes = TakeWakers();
+		}
+		Wake(wakes);
+	}
+
 	//! FINISHED means the stream ended and the claim cannot arrive.
 	PopStatus TryPopClaimed(idx_t claim, PAYLOAD &payload_out) {
 		vector<InterruptState> capacity_wakes;
-		PopStatus status;
+		vector<InterruptState> wakes;
 		{
 			annotated_lock_guard<annotated_mutex> guard(lock);
 			if (errored) {
 				return PopStatus::ERRORED;
 			}
 			auto entry = batches.find(claim);
-			if (entry != batches.end()) {
-				payload_out = std::move(entry->second.payload);
-				buffered_bytes -= entry->second.bytes;
-				batches.erase(entry);
-				capacity_wakes = TakeCapacityWaiters();
-				status = PopStatus::BATCH;
-			} else if (finished) {
+			if (entry == batches.end()) {
 				// Indices are dense and Finish() runs after the last push.
-				return PopStatus::FINISHED;
-			} else {
-				return PopStatus::EMPTY;
+				return finished ? PopStatus::FINISHED : PopStatus::EMPTY;
 			}
+			payload_out = std::move(entry->second.payload);
+			buffered_bytes -= entry->second.bytes;
+			batches.erase(entry);
+			capacity_wakes = TakeCapacityWaiters();
+			wakes = TakeWakers();
 		}
-		cv.notify_all(); // pushers may be waiting on capacity
-		WakeCapacity(capacity_wakes);
-		return status;
+		Wake(capacity_wakes);
+		Wake(wakes);
+		return PopStatus::BATCH;
 	}
 
 	PopStatus TryPopAny(idx_t &batch_index_out, PAYLOAD &payload_out) {
 		vector<InterruptState> capacity_wakes;
+		vector<InterruptState> wakes;
 		{
 			annotated_lock_guard<annotated_mutex> guard(lock);
 			if (errored) {
@@ -204,34 +207,36 @@ public:
 			buffered_bytes -= entry->second.bytes;
 			batches.erase(entry);
 			capacity_wakes = TakeCapacityWaiters();
+			wakes = TakeWakers();
 		}
-		cv.notify_all(); // pushers may be waiting on capacity
-		WakeCapacity(capacity_wakes);
+		Wake(capacity_wakes);
+		Wake(wakes);
 		return PopStatus::BATCH;
 	}
 
-	void WaitForBatch(idx_t claim) {
-		annotated_unique_lock<annotated_mutex> guard(lock);
-		if (batches.find(claim) != batches.end() || finished || errored) {
-			return;
-		}
+	void WaitForBatch(idx_t claim) DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		auto ready = [&] DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
+			return batches.find(claim) != batches.end() || finished || errored;
+		};
 		// The wait has a limit, so the consumer can look for a cancel again.
-		cv.wait_for(guard, std::chrono::milliseconds(200));
+		lock.AwaitWithTimeout(absl::Condition(&ready), absl::Milliseconds(200));
 	}
 
-	void WaitForAny() {
-		annotated_unique_lock<annotated_mutex> guard(lock);
-		if (!batches.empty() || finished || errored) {
-			return;
-		}
+	void WaitForAny() DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		auto ready = [&] DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
+			return !batches.empty() || finished || errored;
+		};
 		// The wait has a limit, so the consumer can look for a cancel again.
-		cv.wait_for(guard, std::chrono::milliseconds(200));
+		lock.AwaitWithTimeout(absl::Condition(&ready), absl::Milliseconds(200));
 	}
 
 	//! End the stream. With expected_total set, a different push count becomes an error.
 	void Finish(optional_idx expected_total = optional_idx()) {
 		std::map<idx_t, shared_ptr<ReadAheadJobCompletion>> drained;
 		vector<InterruptState> capacity_wakes;
+		vector<InterruptState> wakes;
 		{
 			annotated_lock_guard<annotated_mutex> guard(lock);
 			if (expected_total.IsValid() && !errored && pushed_count != expected_total.GetIndex()) {
@@ -244,17 +249,19 @@ public:
 			drained = std::move(waiters);
 			waiters.clear();
 			capacity_wakes = TakeCapacityWaiters();
+			wakes = TakeWakers();
 		}
-		cv.notify_all();
 		for (auto &entry : drained) {
 			entry.second->FinishIOTask();
 		}
-		WakeCapacity(capacity_wakes);
+		Wake(capacity_wakes);
+		Wake(wakes);
 	}
 
 	void SetError(ErrorData error_p) {
 		std::map<idx_t, shared_ptr<ReadAheadJobCompletion>> drained;
 		vector<InterruptState> capacity_wakes;
+		vector<InterruptState> wakes;
 		{
 			annotated_lock_guard<annotated_mutex> guard(lock);
 			if (!errored) {
@@ -265,12 +272,13 @@ public:
 			drained = std::move(waiters);
 			waiters.clear();
 			capacity_wakes = TakeCapacityWaiters();
+			wakes = TakeWakers();
 		}
-		cv.notify_all();
 		for (auto &entry : drained) {
 			entry.second->FinishIOTask();
 		}
-		WakeCapacity(capacity_wakes);
+		Wake(capacity_wakes);
+		Wake(wakes);
 	}
 
 	bool HasError() {
@@ -296,6 +304,22 @@ public:
 	}
 
 private:
+	//! Store a batch that is admitted. Returns the waiter parked on its index, if any.
+	shared_ptr<ReadAheadJobCompletion> InsertLocked(idx_t batch_index, PAYLOAD payload, idx_t bytes)
+	    DUCKDB_REQUIRES(lock) {
+		RecordSeen(batch_index);
+		batches[batch_index] = Entry {std::move(payload), bytes};
+		buffered_bytes += bytes;
+		pushed_count++;
+		shared_ptr<ReadAheadJobCompletion> waiter;
+		auto entry = waiters.find(batch_index);
+		if (entry != waiters.end()) {
+			waiter = std::move(entry->second);
+			waiters.erase(entry);
+		}
+		return waiter;
+	}
+
 	//! No pending batch is before this one, so the next pop waits for this index. Admit it over the
 	//! limit: that is the only way to make progress.
 	bool HeadOfStream(idx_t batch_index) const DUCKDB_REQUIRES(lock) {
@@ -317,8 +341,14 @@ private:
 		return taken;
 	}
 
+	vector<InterruptState> TakeWakers() DUCKDB_REQUIRES(lock) {
+		auto taken = std::move(wakers);
+		wakers.clear();
+		return taken;
+	}
+
 	//! Fired outside the lock. An unnecessary wake only makes the producer retry.
-	static void WakeCapacity(vector<InterruptState> &wakes) {
+	static void Wake(vector<InterruptState> &wakes) {
 		for (auto &state : wakes) {
 			state.Callback();
 		}
@@ -331,7 +361,6 @@ private:
 	};
 
 	annotated_mutex lock;
-	std::condition_variable cv;
 	idx_t next_claim DUCKDB_GUARDED_BY(lock) = 1;
 	std::map<idx_t, Entry> batches DUCKDB_GUARDED_BY(lock);
 	idx_t buffered_bytes DUCKDB_GUARDED_BY(lock) = 0;
@@ -340,6 +369,8 @@ private:
 	std::map<idx_t, shared_ptr<ReadAheadJobCompletion>> waiters DUCKDB_GUARDED_BY(lock);
 	//! Parked by TryPushBatch. A pop that frees bytes, or a stream close, fires all of them.
 	vector<InterruptState> capacity_waiters DUCKDB_GUARDED_BY(lock);
+	//! Fired by the next change of any kind.
+	vector<InterruptState> wakers DUCKDB_GUARDED_BY(lock);
 	//! Checked against Finish(expected_total). Dedupe keeps retries out of this count.
 	idx_t pushed_count DUCKDB_GUARDED_BY(lock) = 0;
 	QuackDenseIndexSet seen DUCKDB_GUARDED_BY(lock);

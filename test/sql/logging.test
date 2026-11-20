@@ -16,7 +16,7 @@ CALL enable_logging('Quack');
 
 # enable server-side logging
 statement ok quack_db:quack_server_con
-CALL enable_logging('Quack');
+CALL enable_logging('Quack', storage = 'memory');
 
 # quack_query should produce RPC log entries
 query I

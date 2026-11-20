@@ -22,6 +22,15 @@ idx_t QuackGetUBigintSetting(DatabaseInstance &db, const char *name, idx_t defau
 	return default_value;
 }
 
+DeserializationChecks QuackPeerDataChecks(DatabaseInstance &db, DeserializationChecks checks) {
+	Value val;
+	if (DBConfig::GetConfig(db).TryGetCurrentSetting("quack_check_peer_data", val) && !val.IsNull() &&
+	    !val.GetValue<bool>()) {
+		return DeserializationChecks::NONE;
+	}
+	return checks;
+}
+
 idx_t QuackServerStreamBufferBytes(DatabaseInstance &db) {
 	// The budget applies separately to each buffer; an INSERT also has a result buffer.
 	auto bytes =

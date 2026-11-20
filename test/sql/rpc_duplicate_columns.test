@@ -7,7 +7,7 @@ include test/template/quack_setup.test_template
 statement ok con2
 create secret (type quack, token 'asdf')
 
-# Duplicate names are legal in the remote query - the second one is renamed to x_1.
+# Duplicate names are legal in the remote query - the second one is renamed to x:1.
 query II con2
 SELECT * FROM quack_query({server}, 'SELECT 1 AS x, 2 AS x');
 ----
@@ -19,18 +19,18 @@ SELECT x FROM quack_query({server}, 'SELECT 1 AS x, 2 AS x');
 1
 
 query I con2
-SELECT x_1 FROM quack_query({server}, 'SELECT 1 AS x, 2 AS x');
+SELECT "x:1" FROM quack_query({server}, 'SELECT 1 AS x, 2 AS x');
 ----
 2
 
-# Three-way duplicate, interleaved with a distinct column: x, y, x_1, x_2.
+# Three-way duplicate, interleaved with a distinct column: x, y, x:1, x:2.
 query IIII con2
 SELECT * FROM quack_query({server}, 'SELECT 1 AS x, 2 AS y, 3 AS x, 4 AS x');
 ----
 1	2	3	4
 
 query II con2
-SELECT x_2, y FROM quack_query({server}, 'SELECT 1 AS x, 2 AS y, 3 AS x, 4 AS x');
+SELECT "x:2", y FROM quack_query({server}, 'SELECT 1 AS x, 2 AS y, 3 AS x, 4 AS x');
 ----
 4	2
 
@@ -50,7 +50,7 @@ SELECT * FROM quack_query_by_name('q', 'SELECT 1 AS x, 2 AS x');
 1	2
 
 query II con2
-SELECT x_1, x FROM quack_query_by_name('q', 'SELECT 1 AS x, 2 AS x');
+SELECT "x:1", x FROM quack_query_by_name('q', 'SELECT 1 AS x, 2 AS x');
 ----
 2	1
 
