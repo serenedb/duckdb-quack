@@ -111,18 +111,18 @@ const char *EnumUtil::ToChars<MessageType>(MessageType value) {
 }
 
 string QuackSereneDBHeader() {
-	return to_string(StorageVersionToDisk(StorageVersion::SERENEDB_LATEST));
+	return to_string(StorageVersionToDisk(StorageVersion::SDB_LATEST));
 }
 
 StorageVersion QuackSereneDBWireVersion(idx_t peer_version) {
 	auto peer = StorageVersionFromDisk(peer_version);
-	auto version = MinValue(peer, StorageVersion::SERENEDB_LATEST);
+	auto version = MinValue(peer, StorageVersion::SDB_LATEST);
 	if (!IsSereneDBStorageVersion(peer) || !IsReadableStorageVersion(version)) {
 		throw InvalidInputException("The SereneDB peer writes storage version %s at newest, and this SereneDB reads "
 		                            "%s through %s",
 		                            StorageVersionInfo::GetStorageVersionString(peer),
-		                            StorageVersionInfo::GetStorageVersionString(SERENEDB_VERSION_LOWER),
-		                            StorageVersionInfo::GetStorageVersionString(SERENEDB_VERSION_UPPER));
+		                            StorageVersionInfo::GetStorageVersionString(SDB_VERSION_LOWER),
+		                            StorageVersionInfo::GetStorageVersionString(SDB_VERSION_UPPER));
 	}
 	return version;
 }
